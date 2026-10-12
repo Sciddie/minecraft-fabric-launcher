@@ -1,0 +1,35 @@
+# Merge into spigot.yml (world-settings.default)
+settings:
+  save-user-cache-on-stop-only: true
+  netty-threads: 1
+  log-villager-deaths: false
+  log-named-deaths: false
+world-settings:
+  default:
+    view-distance: 2
+    simulation-distance: 2
+    mob-spawn-range: 2
+    entity-activation-range:
+      animals: 8
+      monsters: 8
+      raiders: 8
+      misc: 4
+      water: 4
+      villagers: 8
+      flying-monsters: 8
+      tick-inactive-villagers: false
+    entity-tracking-range:
+      players: 8
+      animals: 8
+      monsters: 8
+      misc: 8
+      display: 8
+      other: 8
+    max-tick-time:
+      tile: 10
+      entity: 10
+    hopper-transfer: 64
+    hopper-check: 64
+    merge-radius:
+      item: 4.0
+      exp: 6.0

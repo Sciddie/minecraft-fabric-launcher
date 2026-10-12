@@ -1,0 +1,337 @@
+<!DOCTYPE html><html lang="de"><head><meta charset="utf-8"><title>FabricLauncher – Dokumentation</title><style>body{font:16px/1.6 system-ui,Segoe UI,sans-serif;max-width:960px;margin:2em auto;padding:0 1em;color:#1d2330;background:#fafbfc}
+h1{border-bottom:3px solid #3a8f3a;padding-bottom:.3em}h2{margin-top:2em;color:#2c6e2c;border-bottom:1px solid #ddd}
+table{border-collapse:collapse;width:100%;margin:1em 0}th,td{border:1px solid #d0d7de;padding:6px 10px;text-align:left;vertical-align:top}th{background:#e8f2e8}tr:nth-child(even) td{background:#f4f6f8}
+code{background:#eef0f3;padding:1px 5px;border-radius:4px;font-size:.92em}pre{background:#1e2430;color:#e6e6e6;padding:1em;border-radius:8px;overflow:auto}pre code{background:none;color:inherit}
+blockquote{border-left:4px solid #e0a800;background:#fff8e1;margin:1em 0;padding:.5em 1em}</style></head><body><h1>FabricLauncher – Dokumentation</h1>
+<p><em>Stand: 12.10.2026 · Plugin-Version 1.0.0 · Spigot 26.3 / Java 25 · Zap-Hosting-Server <code>g266459</code></em></p>
+<h2>1. Zweck und Architektur</h2>
+<p>Zap-Hosting bietet für dieses Paket nur Spigot an. <strong>FabricLauncher</strong> ist ein Spigot-Plugin, das daraus einen „Wirt“ macht:</p>
+<ul>
+<li>Der <strong>äußere Spigot-Server</strong> (Port 2060) ist eine leere, minimierte Lobby (<code>lobby_empty</code>, Void-Flachwelt, Whitelist an und leer). Er existiert nur, damit Zap etwas starten kann.</li>
+<li>FabricLauncher startet beim Enable als <strong>eigenen Prozess (Child)</strong> einen <strong>Fabric-Server</strong> im Ordner <code>child-server/</code> auf <strong>Port 2063</strong>. Dort wird tatsächlich gespielt (Welt <code>child-server/world</code>).</li>
+<li>Ausgabe des Child landet mit Präfix <code>[Child]</code> in der Spigot-Konsole/-Log; Befehle gehen per stdin an den Child.</li>
+<li>Ein eingebautes <strong>Web-Dashboard</strong> (Port 2064) zeigt Status, Ressourcen, Konsole, Spieler, Dateien, Logs und Konfiguration.</li>
+<li><strong>OuterTuner</strong> drosselt den äußeren Spigot auf ein Minimum an CPU/RAM.</li>
+</ul>
+<pre><code>Zap-Container (4 Kerne)
+└─ Spigot-JVM (Lobby, ~0,5 GB RSS)            Port 2060 (Spiel), 2061 (Query), 2062 (RCON)
+   └─ FabricLauncher-Plugin
+      ├─ Dashboard (HTTP)                       Port 2064
+      └─ Child-Prozess: java -Xmx8G -jar fabric-server-launch-26.3.jar   Port 2063
+</code></pre>
+<h2>2. Ports</h2>
+<table>
+<thead>
+<tr>
+<th>Port</th>
+<th>Dienst</th>
+<th>Hinweis</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>2060</td>
+<td>Spigot (Lobby)</td>
+<td>Whitelist an, niemand soll hier joinen</td>
+</tr>
+<tr>
+<td>2061</td>
+<td>Query des Spigot</td>
+<td>für Zap-Statusanzeige, aktiv gelassen</td>
+</tr>
+<tr>
+<td>2062</td>
+<td>RCON des Spigot</td>
+<td>Passwort in <code>server.properties</code> / <code>deploy\rcon.txt</code> auf FlosPC</td>
+</tr>
+<tr>
+<td><strong>2063</strong></td>
+<td><strong>Fabric-Child – hier spielen</strong></td>
+<td><code>&lt;SERVER-IP&gt;:2063</code></td>
+</tr>
+<tr>
+<td>2064</td>
+<td>Web-Dashboard</td>
+<td><code>http://&lt;SERVER-IP&gt;:2064/</code></td>
+</tr>
+</tbody>
+</table>
+<h2>3. Installation</h2>
+<ol>
+<li><code>FabricLauncher-1.0.0.jar</code> nach <code>plugins/</code> hochladen (FTP).</li>
+<li>Spigot starten. Beim ersten Start:</li>
+<li><code>plugins/FabricLauncher/config.yml</code> wird erzeugt,</li>
+<li>Dashboard-Passwort wird erzeugt (<code>plugins/FabricLauncher/dashboard-password.txt</code>, einmalig im Log),</li>
+<li>Fabric-Server-Jar und Mods (Modrinth) werden nach <code>child-server/</code> geladen, <code>eula.txt</code> wird gesetzt.</li>
+<li>Sind beim ersten Anlegen von <code>child-server/</code> im Spigot-Root <code>ops.json</code>, <code>whitelist.json</code>, <code>banned-*.json</code>, <code>usercache.json</code> vorhanden, werden sie kopiert.</li>
+</ol>
+<h2>4. config.yml (Schlüssel und Standardwerte)</h2>
+<table>
+<thead>
+<tr>
+<th>Schlüssel</th>
+<th>Standard</th>
+<th>Bedeutung</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>type</code></td>
+<td><code>fabric</code></td>
+<td><code>fabric</code> | <code>paper</code> | <code>vanilla</code> | <code>custom</code></td>
+</tr>
+<tr>
+<td><code>mcVersion</code></td>
+<td><code>"26.3"</code></td>
+<td>Minecraft-Version des Child</td>
+</tr>
+<tr>
+<td><code>port</code></td>
+<td><code>2063</code></td>
+<td>Port des Child (wird in dessen server.properties erzwungen)</td>
+</tr>
+<tr>
+<td><code>serverIp</code></td>
+<td><code>"&lt;SERVER-IP&gt;"</code></td>
+<td>Bind-Adresse des Child (<code>""</code> = alle)</td>
+</tr>
+<tr>
+<td><code>customJar</code></td>
+<td><code>"server.jar"</code></td>
+<td>nur bei <code>type: custom</code></td>
+</tr>
+<tr>
+<td><code>fabricLoaderVersion</code> / <code>fabricInstallerVersion</code></td>
+<td><code>latest</code></td>
+<td>neueste stabile Version</td>
+</tr>
+<tr>
+<td><code>workingDir</code></td>
+<td><code>./child-server</code></td>
+<td>Ordner des Child</td>
+</tr>
+<tr>
+<td><code>memory.xms</code> / <code>memory.xmx</code></td>
+<td><code>8G</code> / <code>8G</code></td>
+<td>Heap des Child</td>
+</tr>
+<tr>
+<td><code>jvmFlags</code></td>
+<td>Aikar-Flags (G1)</td>
+<td>zusätzliche JVM-Flags; <code>G1RSetUpdatingPauseIntervalMillis</code> wird automatisch ausgefiltert (Java 25)</td>
+</tr>
+<tr>
+<td><code>serverArgs</code></td>
+<td><code>[]</code></td>
+<td>Argumente nach <code>nogui</code></td>
+</tr>
+<tr>
+<td><code>autoStart</code></td>
+<td><code>true</code></td>
+<td>Child beim Plugin-Start starten</td>
+</tr>
+<tr>
+<td><code>autoRestart.enabled</code></td>
+<td><code>true</code></td>
+<td>Child nach Absturz neu starten</td>
+</tr>
+<tr>
+<td><code>autoRestart.initialDelaySeconds</code></td>
+<td><code>5</code></td>
+<td>erste Wartezeit, verdoppelt sich je Versuch</td>
+</tr>
+<tr>
+<td><code>autoRestart.maxDelaySeconds</code></td>
+<td><code>300</code></td>
+<td>Obergrenze der Wartezeit</td>
+</tr>
+<tr>
+<td><code>autoRestart.resetAfterSeconds</code></td>
+<td><code>600</code></td>
+<td>nach so langer Laufzeit wird der Zähler zurückgesetzt</td>
+</tr>
+<tr>
+<td><code>autoRestart.maxAttempts</code></td>
+<td><code>0</code></td>
+<td>0 = unbegrenzt</td>
+</tr>
+<tr>
+<td><code>stopTimeoutSeconds</code></td>
+<td><code>60</code></td>
+<td>Wartezeit auf sauberes Stoppen, danach Kill</td>
+</tr>
+<tr>
+<td><code>shutdownHookTimeoutSeconds</code></td>
+<td><code>25</code></td>
+<td>dito beim JVM-Shutdown (SIGTERM/Zap)</td>
+</tr>
+<tr>
+<td><code>saveAllIntervalMinutes</code></td>
+<td><code>5</code></td>
+<td>periodisches <code>save-all</code> (0 = aus)</td>
+</tr>
+<tr>
+<td><code>logPrefix</code></td>
+<td><code>"[Child] "</code></td>
+<td>Präfix im Spigot-Log</td>
+</tr>
+<tr>
+<td><code>mods.lithium</code> / <code>mods.ferrite-core</code> / <code>mods.c2me-fabric</code></td>
+<td><code>true</code> / <code>true</code> / <code>false</code></td>
+<td>Modrinth-Slugs, automatisch geladen</td>
+</tr>
+<tr>
+<td><code>serverProperties.*</code></td>
+<td>siehe unten</td>
+<td>werden bei <strong>jedem</strong> Start in die Child-<code>server.properties</code> geschrieben</td>
+</tr>
+<tr>
+<td><code>dashboard.enabled</code></td>
+<td><code>true</code></td>
+<td>Dashboard an/aus</td>
+</tr>
+<tr>
+<td><code>dashboard.port</code></td>
+<td><code>2064</code></td>
+<td>Port</td>
+</tr>
+<tr>
+<td><code>dashboard.bind</code></td>
+<td><code>""</code></td>
+<td><code>""</code> = <code>serverIp</code>, <code>0.0.0.0</code> = alle</td>
+</tr>
+<tr>
+<td><code>neuterOuter</code></td>
+<td><code>true</code></td>
+<td>OuterTuner aktiv (siehe Abschnitt 7)</td>
+</tr>
+</tbody>
+</table>
+<p>Standardwerte unter <code>serverProperties</code>: <code>white-list: false</code>, <code>enforce-whitelist: false</code>, <code>view-distance: 12</code>, <code>simulation-distance: 4</code>, <code>motd</code>, <code>difficulty: normal</code>, <code>allow-flight: true</code>, <code>spawn-protection: 0</code>, <code>max-players: 30</code>, <code>pause-when-empty-seconds: 0</code>, <code>enable-query: false</code>, <code>enable-rcon: false</code>, <code>sync-chunk-writes: false</code>, <code>network-compression-threshold: 512</code>.</p>
+<blockquote>
+<p><strong>Wichtig:</strong> Im Child müssen <code>white-list=false</code> und <code>pause-when-empty-seconds=0</code> bleiben.</p>
+</blockquote>
+<h2>5. Befehle (<code>/child</code>, Permission <code>fabriclauncher.admin</code>, Standard: OP/Konsole/RCON)</h2>
+<table>
+<thead>
+<tr>
+<th>Befehl</th>
+<th>Wirkung</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/child start</code></td>
+<td>Child starten</td>
+</tr>
+<tr>
+<td><code>/child stop</code></td>
+<td>Child sauber stoppen (bis <code>stopTimeoutSeconds</code>)</td>
+</tr>
+<tr>
+<td><code>/child restart</code></td>
+<td>Stoppen, config neu laden, starten</td>
+</tr>
+<tr>
+<td><code>/child status</code></td>
+<td>Läuft? PID, Uptime, Typ, Port, Ordner</td>
+</tr>
+<tr>
+<td><code>/child cmd &lt;befehl&gt;</code></td>
+<td>Befehl an die Child-Konsole, z. B. <code>/child cmd whitelist add Name</code></td>
+</tr>
+<tr>
+<td><code>/child config set &lt;pfad&gt; &lt;wert&gt;</code></td>
+<td>Wert in config.yml setzen (<code>true/false/Zahl/Text</code>, Listen: <code>[list]a,b</code>)</td>
+</tr>
+<tr>
+<td><code>/child prop set &lt;key&gt; &lt;wert&gt;</code></td>
+<td>Wert in der Child-server.properties setzen</td>
+</tr>
+</tbody>
+</table>
+<p>Per RCON (Port 2062) funktionieren dieselben Befehle ohne Schrägstrich.</p>
+<h2>6. Dashboard (http://&lt;SERVER-IP&gt;:2064/)</h2>
+<ul>
+<li><strong>Login</strong> mit Passwort aus <code>plugins/FabricLauncher/dashboard-password.txt</code> (Datei ändern + Spigot-Neustart = neues Passwort). Sitzungen 12 h; nach 5 Fehlversuchen Sperre pro IP (30 s, steigend bis 1 h).</li>
+<li><strong>Status:</strong> Start/Neustart/Stopp, Uptime, PID, Spieler.</li>
+<li><strong>Ressourcen Spigot vs. Fabric</strong> (Aktualisierung alle 3 s): RSS, Heap, CPU (% eines Kerns), Threads, TPS/MSPT, geladene Chunks/Entities der Lobby. Child-TPS/MSPT kommen aus <code>tick query</code> (höchstens alle 10 s, nur solange das Dashboard offen ist; die Antwortzeilen werden aus Konsole/Log herausgefiltert). Spigot-„MSPT“ ist das gemessene Tick-Intervall (~50 ms = gesund). Child-Heap ist von außen nicht messbar (angezeigt: Xmx).</li>
+<li><strong>Konsole</strong> live (SSE) mit Befehlseingabe, <strong>Spieler</strong> (Whitelist/OP/Kick/Ban), Editor für <strong>server.properties</strong> und <strong>config.yml</strong>, <strong>Dateimanager</strong> (nur innerhalb <code>child-server/</code>, Upload bis 1 GB, Löschen nur einzelner Dateien/leerer Ordner mit Bestätigung), <strong>Logs</strong> (auch <code>.gz</code>).</li>
+</ul>
+<blockquote>
+<p><strong>Sicherheitshinweis:</strong> Das Dashboard läuft über <strong>unverschlüsseltes HTTP</strong>. Passwort und Sitzungscookie können in fremden Netzen mitgelesen werden. Nur aus vertrauenswürdigen Netzen nutzen, starkes Passwort verwenden, bei Verdacht Passwort-Datei ändern und Spigot neu starten. Das Dashboard hat Vollzugriff auf den Child-Server (Konsole, Dateien).</p>
+</blockquote>
+<h2>7. OuterTuner (äußerer Spigot)</h2>
+<p>Bei jedem Plugin-Start (wenn <code>neuterOuter: true</code>):</p>
+<ul>
+<li><strong>server.properties (Spigot):</strong> <code>view-/simulation-distance=2</code>, <code>spawn-monsters/animals/npcs=false</code>, <code>allow-nether=false</code>, <code>generate-structures=false</code>, <code>max-players=2</code>, <code>white-list=true</code>, <code>enforce-whitelist=true</code>, <code>spawn-protection=0</code>, <code>sync-chunk-writes=false</code>, <code>entity-broadcast-range-percentage=10</code>. Query (2061) bleibt an.</li>
+<li><strong>bukkit.yml:</strong> <code>allow-end=false</code>, <code>allow-nether=false</code>, alle <code>spawn-limits</code> = 0, Spawn-Intervalle 6000, <code>autosave</code> 72000 Ticks, <code>chunk-gc</code> 200. Vorherige Version als <code>bukkit.yml.fl-bak</code>.</li>
+<li><strong>spigot.yml:</strong> View/Simulation 2, <code>mob-spawn-range</code> 0, Activation-Range 2, Tracking-Range 8, <code>tick-inactive-villagers: false</code>, <code>nerf-spawner-mobs: true</code>, <code>save-user-cache-on-stop-only: true</code>. Backup <code>spigot.yml.fl-bak</code>.</li>
+<li><strong>Laufzeit (Lobby-Welten):</strong> Mob-Spawning, Wetter, Feuer aus, <code>randomTickSpeed 0</code>, Spawn-Chunk-Radius 0 (falls vorhanden).</li>
+<li>Entfernt <strong>leere</strong> Altordner <code>world_nether/</code>, <code>world_the_end/</code>, <code>timings/</code> im Root (nur wenn leer).</li>
+<li>Datei-Änderungen wirken ab dem <strong>nächsten</strong> Spigot-Start. <code>child-server/</code> wird nie angefasst.</li>
+<li>Zap setzt beim Start u. U. <code>max-players</code> zurück; der OuterTuner setzt es danach wieder (unkritisch, Whitelist sperrt ohnehin).</li>
+</ul>
+<h2>8. Herunterfahren und Speichern</h2>
+<ul>
+<li>Alle 5 min <code>save-all</code> an den Child.</li>
+<li>Spigot-Stopp (Konsole, RCON <code>stop</code>, Zap-Panel): <code>onDisable</code> schickt <code>stop</code> an den Child und wartet bis 60 s; danach Kill (Log-Warnung).</li>
+<li>Zusätzlich JVM-Shutdown-Hook (25 s) für SIGTERM / Zap-Neustart, falls <code>onDisable</code> nicht läuft.</li>
+<li>Empfohlen: Server per RCON <code>stop</code> oder Panel-Stopp beenden, <strong>nicht</strong> „Kill“.</li>
+</ul>
+<h2>9. Fabric / Mods aktualisieren</h2>
+<ul>
+<li><strong>Neue MC-Version:</strong> <code>mcVersion</code> ändern → <code>/child restart</code>. Fehlt <code>fabric-server-launch-&lt;mc&gt;.jar</code>, wird es mit neuestem Loader geladen.</li>
+<li><strong>Neuer Fabric-Loader bei gleicher Version:</strong> <code>child-server/fabric-server-launch-&lt;mc&gt;.jar</code> löschen → <code>/child restart</code>.</li>
+<li><strong>Mods:</strong> neue Slugs unter <code>mods:</code> mit <code>true</code> eintragen. Geladen wird nur, wenn keine Markerdatei <code>mods/.fl-&lt;slug&gt;-*.marker</code> existiert. Update: Mod-Jar <strong>und</strong> Marker löschen → Neustart. Eigene Mods einfach nach <code>child-server/mods/</code> legen.</li>
+<li>Vor Versionssprüngen immer ein Backup der Welt machen.</li>
+</ul>
+<h2>10. Wechsel auf Paper / Vanilla / eigenes Jar</h2>
+<p><code>type: paper</code> (lädt Paper über fill.papermc.io, bevorzugt STABLE), <code>type: vanilla</code> (Mojang-Manifest) oder <code>type: custom</code> + <code>customJar</code>. Danach <code>/child restart</code>. Der Weltordner <code>child-server/world</code> bleibt; Paper legt Nether/End allerdings in eigene Ordner (<code>world_nether</code>, <code>world_the_end</code>) – vorher sichern und ggf. umziehen.</p>
+<h2>11. Fehlerbehebung</h2>
+<table>
+<thead>
+<tr>
+<th>Problem</th>
+<th>Lösung</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Child startet nicht, „Unrecognized VM option“</td>
+<td>Java 25 kennt einige alte Aikar-Flags nicht. <code>-XX:+IgnoreUnrecognizedVMOptions</code> wird automatisch gesetzt, <code>G1RSetUpdatingPauseIntervalMillis</code> gefiltert. Weitere problematische Flags aus <code>jvmFlags</code> entfernen.</td>
+</tr>
+<tr>
+<td>FTP-Upload liefert <strong>550</strong></td>
+<td>Datei/Ordner gehört dem Server-Prozess bzw. Root-Ordner ist für FTP nicht beschreibbar. Jars lassen sich überschreiben. Konfiguration über Dashboard bzw. <code>/child config set</code> ändern; Root-Ordner kann nicht per FTP gelöscht werden (OuterTuner räumt leere Ordner).</td>
+</tr>
+<tr>
+<td>Zap-Neustart / Panel-Stopp</td>
+<td>Shutdown-Hook stoppt den Child (25 s). Bei Datenverlust-Sorge vorher <code>/child cmd save-all</code> bzw. RCON <code>stop</code> nutzen.</td>
+</tr>
+<tr>
+<td>Child stürzt in Schleife ab</td>
+<td>Log ansehen; Auto-Restart mit wachsender Pause bis 300 s. <code>/child stop</code> beendet die Schleife.</td>
+</tr>
+<tr>
+<td>Dashboard nicht erreichbar</td>
+<td>Port 2064, <code>dashboard.enabled</code>, Log „Dashboard listening…“. Gesperrt? 30 s bis 1 h warten.</td>
+</tr>
+<tr>
+<td>Spieler kommen nicht rein</td>
+<td>Port <strong>2063</strong> benutzen (nicht 2060). <code>/child status</code>, Child-Whitelist ist absichtlich aus.</td>
+</tr>
+<tr>
+<td>TPS im Dashboard leer</td>
+<td>Child noch &lt; 30 s online oder Dashboard gerade erst geöffnet – ~10 s warten.</td>
+</tr>
+</tbody>
+</table>
+<h2>12. Backup</h2>
+<ul>
+<li>Vollbackup: <code>C:\Users\aiche\MinecraftBackup\2026-10-12\g266459</code> (auf FlosPC).</li>
+<li>Plugin-Jars + diese Doku: <code>C:\Users\aiche\MinecraftBackup\plugins\</code>.</li>
+<li>Deploy-Hilfen (RCON-Skript, Konfig-Kopien): <code>C:\Users\aiche\MinecraftBackup\deploy\</code>.</li>
+</ul>
+<h2>13. WorldPorter (außer Dienst)</h2>
+<p>WorldPorter war ein einmaliges Hilfsplugin, das die alte Spigot-Welt (<code>world</code>, <code>world_nether</code>, <code>world_the_end</code>) nach <code>child-server/world</code> (Vanilla-Dimensionsstruktur) verschoben und mit <code>plugins/WorldPorter/done.marker</code> als erledigt markiert hat. Die Migration ist abgeschlossen; das Plugin wurde am 12.10.2026 vom Server entfernt. Das Jar liegt unter <code>C:\Users\aiche\MinecraftBackup\plugins\WorldPorter-1.0.0.jar</code>. <strong>Nicht erneut installieren</strong>, solange <code>child-server/world</code> existiert.</p></body></html>

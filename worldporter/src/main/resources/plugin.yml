@@ -1,0 +1,14 @@
+name: WorldPorter
+version: ${project.version}
+main: de.aichele.worldporter.WorldPorterPlugin
+api-version: '26.3'
+load: POSTWORLD
+description: Moves (renames) world folders between Spigot and vanilla/Fabric layout. Never deletes.
+commands:
+  worldporter:
+    description: Run or preview the world move
+    usage: /worldporter <run|dryrun|plan>
+    permission: worldporter.admin
+permissions:
+  worldporter.admin:
+    default: op

@@ -1,0 +1,17 @@
+# Run automatically on enable (only once: a marker file is written after a successful real run)
+runOnEnable: true
+# true = only log what would happen
+dryRun: false
+# spigot-to-vanilla: source (Spigot layout) -> target (vanilla/Fabric layout)
+# vanilla-to-spigot: source (vanilla layout) -> target (Spigot layout)
+# move-only:         move the three folders unchanged
+direction: spigot-to-vanilla
+# Both relative to the Spigot server root. MUST be on the same filesystem (rename, no copy).
+sourceDir: "."
+targetDir: "./child-server"
+worlds:
+  overworld: world
+  nether: world_nether
+  end: world_the_end
+# Name of the overworld folder in the target (vanilla/Fabric level-name)
+targetLevelName: world

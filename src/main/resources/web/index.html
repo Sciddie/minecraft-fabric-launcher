@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Server-Dashboard</title>
+<style>
+:root{--bg:#0f1115;--p:#171a21;--p2:#1f2330;--b:#2a2f3d;--t:#e3e6ee;--m:#8a91a5;--a:#4f8cff;--g:#3ecf8e;--r:#ff5c5c;--y:#f5b942}
+*{box-sizing:border-box}body{margin:0;font:14px/1.45 system-ui,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--t)}
+header{display:flex;align-items:center;gap:16px;padding:10px 18px;background:var(--p);border-bottom:1px solid var(--b)}
+header h1{font-size:16px;margin:0;font-weight:600}nav{display:flex;gap:4px;flex-wrap:wrap}
+nav button{background:none;border:0;color:var(--m);padding:8px 12px;border-radius:6px;cursor:pointer;font:inherit}
+nav button.on,nav button:hover{background:var(--p2);color:var(--t)}
+main{padding:18px;max-width:1300px;margin:auto}.card{background:var(--p);border:1px solid var(--b);border-radius:10px;padding:16px;margin-bottom:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}.kv{background:var(--p2);border-radius:8px;padding:10px}.kv b{display:block;font-size:12px;color:var(--m);font-weight:500}.kv span{font-size:18px}
+button.btn{background:var(--p2);color:var(--t);border:1px solid var(--b);padding:7px 14px;border-radius:6px;cursor:pointer;font:inherit}
+button.btn:hover{border-color:var(--a)}.pri{background:var(--a)!important;border-color:var(--a)!important}.dan{color:var(--r)!important}.ok{color:var(--g)}.bad{color:var(--r)}
+input,textarea,select{background:#0b0d11;color:var(--t);border:1px solid var(--b);border-radius:6px;padding:7px 9px;font:inherit}
+textarea{width:100%;min-height:60vh;font:13px/1.4 ui-monospace,Consolas,monospace;resize:vertical}
+#con{height:60vh;overflow:auto;background:#0b0d11;border-radius:8px;padding:10px;font:12.5px/1.4 ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-all}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.row input{flex:1}
+table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:6px 8px;border-bottom:1px solid var(--b)}tr:hover td{background:var(--p2)}
+a{color:var(--a);cursor:pointer;text-decoration:none}.muted{color:var(--m)}.hide{display:none!important}
+.W{color:var(--y)}.E{color:var(--r)}.L{color:var(--a)}
+#login{max-width:340px;margin:12vh auto}#toast{position:fixed;right:16px;bottom:16px;background:var(--p2);border:1px solid var(--b);padding:10px 14px;border-radius:8px;display:none;max-width:420px}
+.pill{display:inline-block;background:var(--p2);border-radius:20px;padding:3px 10px;margin:3px}
+</style></head><body>
+<div id="login" class="card hide"><h2 style="margin-top:0">Anmelden</h2>
+<form onsubmit="doLogin();return false"><div class="row"><input id="pw" type="password" placeholder="Passwort" autofocus></div>
+<div class="row" style="margin-top:10px"><button class="btn pri">Anmelden</button><span id="lerr" class="bad"></span></div></form>
+<p class="muted">Passwort: plugins/FabricLauncher/dashboard-password.txt</p></div>
+
+<div id="app" class="hide">
+<header><h1>🟩 Server-Dashboard</h1><nav id="nav"></nav><span style="flex:1"></span><span id="hstate" class="muted"></span><button class="btn" onclick="logout()">Abmelden</button></header>
+<main>
+<section id="t-status">
+ <div class="card"><div class="row" style="margin-bottom:12px"><button class="btn pri" onclick="act('start')">▶ Starten</button><button class="btn" onclick="act('restart')">⟳ Neustarten</button><button class="btn dan" onclick="if(confirm('Server wirklich stoppen?'))act('stop')">■ Stoppen</button></div>
+ <div class="grid" id="stats"></div></div>
+ <div class="card"><b>Ressourcen: Spigot (Lobby) vs. Fabric (Child)</b> <span class="muted">– aktualisiert alle 3 s</span><table id="res" style="margin-top:8px"></table></div>
+ <div class="card"><b>Online-Spieler</b> <a onclick="cmd('list')">(aktualisieren)</a><div id="online" style="margin-top:8px"></div></div>
+</section>
+<section id="t-console" class="hide"><div class="card"><div id="con"></div>
+ <form class="row" style="margin-top:10px" onsubmit="sendCmd();return false"><input id="cin" placeholder="Befehl (ohne /), z.B. say Hallo"><button class="btn pri">Senden</button><label class="muted"><input type="checkbox" id="auto" checked> Auto-Scroll</label></form></div></section>
+<section id="t-players" class="hide"><div class="card"><div class="row"><input id="pname" placeholder="Spielername"><button class="btn" onclick="pc('whitelist add')">Whitelist +</button><button class="btn" onclick="pc('whitelist remove')">Whitelist −</button><button class="btn" onclick="pc('op')">OP +</button><button class="btn" onclick="pc('deop')">OP −</button><button class="btn" onclick="pc('kick')">Kick</button><button class="btn dan" onclick="pc('ban')">Ban</button><button class="btn" onclick="pc('pardon')">Entbannen</button></div>
+ <div class="row" style="margin-top:10px"><button class="btn" onclick="cmd('whitelist on')">Whitelist an</button><button class="btn" onclick="cmd('whitelist off')">Whitelist aus</button><button class="btn" onclick="cmd('whitelist reload')">Whitelist neu laden</button><button class="btn" onclick="loadPlayers()">Aktualisieren</button></div>
+ <div class="grid" id="plists" style="margin-top:14px"></div><p class="muted">Befehle werden an die Server-Konsole gesendet; Server muss laufen.</p></div></section>
+<section id="t-props" class="hide"><div class="card"><div class="row" style="margin-bottom:8px"><b>server.properties (Child)</b><span style="flex:1"></span><button class="btn pri" onclick="saveTxt('props')">Speichern</button></div><textarea id="props" spellcheck="false"></textarea><p class="muted">Änderungen wirken nach einem Neustart. Werte, die in config.yml unter serverProperties stehen, werden automatisch mit synchronisiert.</p></div></section>
+<section id="t-config" class="hide"><div class="card"><div class="row" style="margin-bottom:8px"><b>Launcher config.yml</b><span style="flex:1"></span><button class="btn pri" onclick="saveTxt('config')">Speichern</button></div><textarea id="config" spellcheck="false"></textarea><p class="muted">Wirkt beim nächsten Neustart des Child-Servers. Dashboard-Port/Bind erst nach Spigot-Neustart.</p></div></section>
+<section id="t-files" class="hide"><div class="card"><div class="row" style="margin-bottom:8px"><b id="cwd"></b><span style="flex:1"></span><button class="btn" onclick="mkdir()">Neuer Ordner</button><button class="btn" onclick="newFile()">Neue Datei</button><label class="btn">Hochladen<input type="file" id="up" multiple class="hide" onchange="upload(this.files)"></label></div>
+ <table><thead><tr><th>Name</th><th>Größe</th><th>Geändert</th><th></th></tr></thead><tbody id="flist"></tbody></table></div>
+ <div class="card hide" id="editor"><div class="row" style="margin-bottom:8px"><b id="epath"></b><span style="flex:1"></span><button class="btn pri" onclick="saveFile()">Speichern</button><button class="btn" onclick="$('editor').classList.add('hide')">Schließen</button></div><textarea id="etext" spellcheck="false"></textarea></div></section>
+<section id="t-logs" class="hide"><div class="card"><div class="row" style="margin-bottom:8px"><select id="logsel" onchange="loadLog()"></select><button class="btn" onclick="loadLogs()">Aktualisieren</button><input id="lfilter" placeholder="Filter…" oninput="renderLog()"></div><div id="logv" style="height:65vh;overflow:auto;background:#0b0d11;border-radius:8px;padding:10px;font:12.5px/1.4 ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-all"></div></div></section>
+</main></div><div id="toast"></div>
+<script>
+const $=id=>document.getElementById(id);
+const TABS=[['status','Status'],['console','Konsole'],['players','Spieler'],['props','server.properties'],['config','config.yml'],['files','Dateien'],['logs','Logs']];
+let cur='status',es=null,cwd='',logText='',stTimer=null;
+function toast(m,bad){const t=$('toast');t.textContent=m;t.style.borderColor=bad?'var(--r)':'var(--b)';t.style.display='block';clearTimeout(t._h);t._h=setTimeout(()=>t.style.display='none',4000)}
+async function api(path,opt={}){opt.headers=Object.assign({'X-FL':'1'},opt.headers||{});opt.credentials='same-origin';const r=await fetch(path,opt);
+ if(r.status===401){showLogin();throw new Error('Nicht angemeldet')}
+ const ct=r.headers.get('content-type')||'';const d=ct.includes('json')?await r.json():await r.text();
+ if(!r.ok){const m=(d&&d.error)||d||r.status;toast('Fehler: '+m,true);throw new Error(m)}return d}
+const post=(p,body,raw)=>api(p,{method:'POST',body:raw?body:JSON.stringify(body||{})});
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function showLogin(){$('app').classList.add('hide');$('login').classList.remove('hide');if(es){es.close();es=null}clearInterval(stTimer)}
+async function doLogin(){$('lerr').textContent='';const r=await fetch('/api/login',{method:'POST',headers:{'X-FL':'1'},body:JSON.stringify({password:$('pw').value})});
+ if(r.ok){$('pw').value='';start()}else{const d=await r.json().catch(()=>({}));$('lerr').textContent=d.error||'Fehler'}}
+async function logout(){await post('/api/logout').catch(()=>{});showLogin()}
+function tab(t){cur=t;for(const [k] of TABS){$('t-'+k).classList.toggle('hide',k!==t);$('nb-'+k).classList.toggle('on',k===t)}
+ if(t==='props')loadTxt('props');if(t==='config')loadTxt('config');if(t==='files')ls(cwd);if(t==='logs')loadLogs();if(t==='players')loadPlayers();if(t==='console')scrollCon()}
+function fmtUp(s){const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return (d?d+'d ':'')+h+'h '+m+'m'}
+function fmtSize(n){if(n<1024)return n+' B';if(n<1048576)return (n/1024).toFixed(1)+' KB';if(n<1073741824)return (n/1048576).toFixed(1)+' MB';return (n/1073741824).toFixed(2)+' GB'}
+async function status(){try{const s=await api('/api/status');
+ $('hstate').innerHTML=s.running?'<span class="ok">● läuft</span>':'<span class="bad">● gestoppt</span>';
+ const kv=[['Status',s.running?'<span class="ok">Läuft</span>':'<span class="bad">Gestoppt</span>'],['Uptime',s.running?fmtUp(s.uptime):'–'],['PID',s.pid>0?s.pid:'–'],['CPU',s.cpu>=0&&s.cpu!=null?s.cpu+' %':'–'],['RAM (RSS)',s.rssMb>0?(s.rssMb/1024).toFixed(2)+' GB / '+esc(s.xmx):'–'],['Spieler',s.players.length],['Typ',esc(s.type+' '+s.mcVersion)],['Adresse',esc(s.address)],['Letzter Zustand',esc(s.status)]];
+ $('stats').innerHTML=kv.map(([k,v])=>`<div class="kv"><b>${k}</b><span>${v}</span></div>`).join('');
+ const g=s.spigot||{},n=v=>v!=null&&v>=0,mb=v=>n(v)?(v>=1024?(v/1024).toFixed(2)+' GB':v+' MB'):'–';
+ const rows=[['Prozess-RAM (RSS)',mb(g.rssMb),s.running?mb(s.rssMb):'–'],['Heap belegt / max',mb(g.heapUsedMb)+' / '+mb(g.heapMaxMb),s.running?'? / '+esc(s.xmx):'–'],['CPU (% eines Kerns)',n(g.cpu)?g.cpu+' %':'–',s.running&&n(s.cpu)?s.cpu+' %':'–'],['Threads',n(g.threads)?g.threads:'–',s.running&&n(s.threads)?s.threads:'–'],['TPS',n(g.tps)?g.tps:'–',n(s.tps)?s.tps:'–'],['MSPT',n(g.mspt)?g.mspt+' ms (Tick-Intervall)':'–',n(s.mspt)?s.mspt+' ms':'–'],['Geladene Chunks / Entities',(g.chunks??'–')+' / '+(g.entities??'–')+' ('+(g.worlds??0)+' Welten)','–'],['PID',g.pid??'–',s.pid>0?s.pid:'–']];
+ $('res').innerHTML='<thead><tr><th></th><th>Spigot</th><th>Fabric-Child</th></tr></thead><tbody>'+rows.map(r=>`<tr><td><b>${r[0]}</b></td><td>${r[1]}</td><td>${r[2]}</td></tr>`).join('')+'</tbody>';
+ $('online').innerHTML=s.players.length?s.players.map(p=>`<span class="pill">${esc(p)}</span>`).join(''):'<span class="muted">Niemand online</span>'}catch(e){}}
+async function act(a){await post('/api/action?do='+a);toast({start:'Start angefordert',stop:'Stopp angefordert (bis 60 s)',restart:'Neustart angefordert'}[a]);setTimeout(status,1500)}
+function cls(l){return /\bERROR\b|Exception|FATAL/.test(l)?'E':/\bWARN/.test(l)?'W':l.startsWith('[FabricLauncher]')||l.startsWith('> ')?'L':''}
+function addLine(l){const c=$('con'),d=document.createElement('div');d.textContent=l;const k=cls(l);if(k)d.className=k;c.appendChild(d);while(c.childElementCount>2000)c.firstChild.remove();if($('auto').checked)c.scrollTop=c.scrollHeight}
+function scrollCon(){const c=$('con');c.scrollTop=c.scrollHeight}
+function stream(){if(es)es.close();$('con').innerHTML='';es=new EventSource('/api/console/stream');es.onmessage=e=>addLine(JSON.parse(e.data));
+ es.onerror=()=>{es.close();es=null;setTimeout(async()=>{try{await api('/api/status');stream()}catch(e){}},3000)}}
+async function cmd(c){const r=await post('/api/cmd',{command:c});if(!r.ok)toast('Server läuft nicht',true);else if(cur!=='console')toast('Gesendet: '+c)}
+function sendCmd(){const v=$('cin').value.trim();if(!v)return;cmd(v);$('cin').value=''}
+function pc(c){const n=$('pname').value.trim();if(!/^\w{1,16}$/.test(n)){toast('Ungültiger Name',true);return}cmd(c+' '+n);setTimeout(loadPlayers,1200)}
+async function loadPlayers(){const d=await api('/api/players');const L={whitelist:'Whitelist',ops:'Operatoren','banned-players':'Gebannt',online:'Online'};
+ $('plists').innerHTML=Object.keys(L).map(k=>`<div class="kv"><b>${L[k]} (${d[k].length})</b>${d[k].map(n=>`<span class="pill"><a onclick="$('pname').value='${esc(n)}'">${esc(n)}</a></span>`).join('')||'<span class="muted">–</span>'}</div>`).join('')}
+async function loadTxt(w){$(w).value=await api('/api/'+w)}
+async function saveTxt(w){const r=await post('/api/'+w,$(w).value,true);toast(r.hint||'Gespeichert')}
+function jp(a,b){return a?a+'/'+b:b}
+async function ls(p){const d=await api('/api/fs/list?path='+encodeURIComponent(p||''));cwd=d.path==='.'?'':d.path;
+ const parts=cwd?cwd.split('/'):[];let crumbs=`<a onclick="ls('')">child-server</a>`,acc='';for(const x of parts){acc=jp(acc,x);crumbs+=` / <a onclick="ls('${esc(acc)}')">${esc(x)}</a>`}$('cwd').innerHTML=crumbs;
+ let h=cwd?`<tr><td><a onclick="ls('${esc(parts.slice(0,-1).join('/'))}')">⬆ ..</a></td><td></td><td></td><td></td></tr>`:'';
+ for(const e of d.entries){const p=jp(cwd,e.name),ep=esc(JSON.stringify(p)).replace(/'/g,'&#39;');
+  h+=`<tr><td>${e.dir?'📁':'📄'} <a onclick='${e.dir?'ls':'openFile'}(${ep})'>${esc(e.name)}</a></td><td class="muted">${e.dir?'':fmtSize(e.size)}</td><td class="muted">${new Date(e.mtime).toLocaleString('de-DE')}</td>
+  <td style="text-align:right">${e.dir?'':`<a href="/api/fs/download?path=${encodeURIComponent(p)}">Download</a> · `}<a onclick='ren(${ep})'>Umbenennen</a> · <a class="dan" onclick='del(${ep})'>Löschen</a></td></tr>`}
+ $('flist').innerHTML=h}
+async function openFile(p){if(/\.(jar|zip|mca|dat|png|gz|db|lock)$/i.test(p)&&!p.endsWith('.log.gz')){if(!confirm('Binärdatei – trotzdem als Text öffnen?'))return}
+ $('etext').value=await api('/api/fs/read?path='+encodeURIComponent(p));$('epath').textContent=p;$('editor').classList.remove('hide');$('editor').scrollIntoView()}
+async function saveFile(){const p=$('epath').textContent;if(p.endsWith('.gz')){toast('.gz kann nicht gespeichert werden',true);return}await post('/api/fs/write?path='+encodeURIComponent(p),$('etext').value,true);toast('Gespeichert');ls(cwd)}
+async function ren(p){const n=prompt('Neuer Pfad (relativ zu child-server):',p);if(!n||n===p)return;await post('/api/fs/rename',{from:p,to:n});toast('Umbenannt');ls(cwd)}
+async function del(p){const name=p.split('/').pop();const c=prompt('Wirklich löschen? Nur Dateien oder LEERE Ordner.\nZum Bestätigen den Namen eintippen: '+name);if(c!==name){if(c!==null)toast('Abgebrochen',true);return}await post('/api/fs/delete',{path:p,confirm:c});toast('Gelöscht');ls(cwd)}
+async function mkdir(){const n=prompt('Ordnername:');if(!n)return;await post('/api/fs/mkdir?path='+encodeURIComponent(jp(cwd,n)));ls(cwd)}
+async function newFile(){const n=prompt('Dateiname:');if(!n)return;await post('/api/fs/write?path='+encodeURIComponent(jp(cwd,n)),'',true);ls(cwd);openFile(jp(cwd,n))}
+async function upload(files){for(const f of files){let ow='';try{await api('/api/fs/upload?path='+encodeURIComponent(cwd)+'&name='+encodeURIComponent(f.name),{method:'POST',body:f})}
+ catch(e){if(String(e.message).includes('existiert')&&confirm(f.name+' existiert. Überschreiben?'))await api('/api/fs/upload?overwrite=1&path='+encodeURIComponent(cwd)+'&name='+encodeURIComponent(f.name),{method:'POST',body:f});else continue}toast('Hochgeladen: '+f.name)}$('up').value='';ls(cwd)}
+async function loadLogs(){try{const d=await api('/api/fs/list?path=logs');const fs=d.entries.filter(e=>!e.dir).sort((a,b)=>b.mtime-a.mtime);const sel=$('logsel'),prev=sel.value;
+ sel.innerHTML=fs.map(e=>`<option>${esc(e.name)}</option>`).join('');if(prev&&fs.some(e=>e.name===prev))sel.value=prev;else if(fs.some(e=>e.name==='latest.log'))sel.value='latest.log';loadLog()}catch(e){$('logv').textContent='Kein logs-Ordner'}}
+async function loadLog(){const n=$('logsel').value;if(!n)return;logText=await api('/api/fs/read?path='+encodeURIComponent('logs/'+n));renderLog();const v=$('logv');v.scrollTop=v.scrollHeight}
+function renderLog(){const f=$('lfilter').value.toLowerCase();const v=$('logv');v.innerHTML='';const fr=document.createDocumentFragment();
+ for(const l of logText.split('\n')){if(f&&!l.toLowerCase().includes(f))continue;const d=document.createElement('div');d.textContent=l;const k=cls(l);if(k)d.className=k;fr.appendChild(d)}v.appendChild(fr)}
+function start(){$('login').classList.add('hide');$('app').classList.remove('hide');status();clearInterval(stTimer);stTimer=setInterval(status,3000);stream();tab(cur)}
+$('nav').innerHTML=TABS.map(([k,n])=>`<button id="nb-${k}" onclick="tab('${k}')">${n}</button>`).join('');
+fetch('/api/status',{credentials:'same-origin'}).then(r=>r.ok?start():showLogin()).catch(showLogin);
+</script></body></html>

@@ -2,6 +2,10 @@
 
 Spigot-Plugin (`de.aichele.childlauncher`), das einen äußeren Spigot-Server als Wirt nutzt: Es startet und überwacht einen Fabric-Child-Server und stellt ein Web-Dashboard bereit. Minimale Spigot-Konfiguration für den äußeren Server liegt unter `spigot-minimal-config/`.
 
+## Server einrichten
+
+Schritt für Schritt auf einem neuen Spigot-Server (nur Spigot beim Hoster, FTP, ein freier Zusatzport für Fabric und einer für das Dashboard): **[docs/SETUP.md](docs/SETUP.md)**.
+
 ## Bauen
 
 Voraussetzung: **Java 25** (Minecraft 26.x) und Maven.

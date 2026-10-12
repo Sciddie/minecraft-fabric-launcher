@@ -2,6 +2,8 @@
 
 *Stand: 12.10.2026 · Plugin-Version 1.0.0 · Spigot 26.3 / Java 25 · Zap-Hosting-Server `g266459`*
 
+**Neu aufsetzen:** Schritt für Schritt auf einem neuen Spigot-Server steht in [SETUP.md](SETUP.md).
+
 ## 1. Zweck und Architektur
 
 Zap-Hosting bietet für dieses Paket nur Spigot an. **FabricLauncher** ist ein Spigot-Plugin, das daraus einen „Wirt“ macht:
@@ -31,6 +33,8 @@ Zap-Container (4 Kerne)
 | 2064 | Web-Dashboard | `http://<SERVER-IP>:2064/` |
 
 ## 3. Installation
+
+Die ausführliche Ersteinrichtung (Voraussetzungen, FTP, erster Start, `config.yml`, Weltumzug, Dashboard) steht in [SETUP.md](SETUP.md). Kurzfassung:
 
 1. `FabricLauncher-1.0.0.jar` nach `plugins/` hochladen (FTP).
 2. Spigot starten. Beim ersten Start:

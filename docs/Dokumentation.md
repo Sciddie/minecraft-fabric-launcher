@@ -1,6 +1,6 @@
 # FabricLauncher – Dokumentation
 
-*Stand: 13.10.2026 · Plugin-Version 1.1.0 · Spigot 26.3 / Java 25 · Zap-Hosting-Server `g266459`*
+*Stand: 13.10.2026 · Plugin-Version 1.2.0-pre.1 · Spigot 26.3 / Java 25 · Zap-Hosting-Server `g266459`*
 
 **Neu aufsetzen:** Schritt für Schritt auf einem neuen Spigot-Server steht in [SETUP.md](SETUP.md).
 
@@ -36,7 +36,7 @@ Zap-Container (4 Kerne)
 
 Die ausführliche Ersteinrichtung (Voraussetzungen, FTP, erster Start, `config.yml`, Weltumzug, Dashboard) steht in [SETUP.md](SETUP.md). Kurzfassung:
 
-1. `FabricLauncher-1.1.0.jar` nach `plugins/` hochladen (FTP).
+1. `FabricLauncher-1.2.0-pre.1.jar` nach `plugins/` hochladen (FTP).
 2. Spigot starten. Beim ersten Start:
    - `plugins/FabricLauncher/config.yml` wird erzeugt,
    - Dashboard-Passwort wird erzeugt (`plugins/FabricLauncher/dashboard-password.txt`, einmalig im Log),
@@ -94,6 +94,11 @@ Standardwerte unter `serverProperties`: `white-list: false`, `enforce-whitelist:
 | `/child mod toggle <pfad>` | `.jar` ↔ `.jar.disabled` |
 | `/child diag` | Prozess- und Plattenwerte |
 | `/child threaddump` / `heap` / `flags` | lesende `jcmd`-Ausgabe |
+| `/child servers` | Profile und Laufzustand |
+| `/child focus <id>` | Fokusprofil, schreibt `focusServer` |
+| `/child tasks` / `task run <id>` | Cron-Aufgaben |
+| `/child backup` | Zip des Fokusprofils, optional JDBC-Metadaten |
+| `/child versions <typ>` | Katalog `fabric`, `paper`, `vanilla` oder `spigot`. Es wird nichts geladen. |
 
 Per RCON (Port 2062) funktionieren dieselben Befehle ohne Schrägstrich.
 
@@ -104,8 +109,10 @@ Per RCON (Port 2062) funktionieren dieselben Befehle ohne Schrägstrich.
 - **Ressourcen Spigot vs. Fabric** (Aktualisierung alle 3 s): RSS, Heap, CPU (% eines Kerns), Threads, TPS/MSPT, geladene Chunks/Entities der Lobby. Child-TPS/MSPT kommen aus `tick query` (höchstens alle 10 s, nur solange das Dashboard offen ist; die Antwortzeilen werden aus Konsole/Log herausgefiltert). Spigot-„MSPT“ ist das gemessene Tick-Intervall (~50 ms = gesund). Child-Heap ist von außen nicht messbar (angezeigt: Xmx).
 - **Konsole** live (SSE) mit Befehlseingabe, **Spieler** (Whitelist/OP/Kick/Ban), Rohtext für **server.properties** und **config.yml**, **Dateimanager** (nur innerhalb `child-server/`, Upload bis 1 GB, Löschen nur einzelner Dateien/leerer Ordner mit Bestätigung), **Logs** (Level, Filter, auch `.gz`, Fenster vom Dateiende), **Mods** (Liste, Toggle, Modrinth on demand), **Diagnose** (RSS, FDs, Platte, MSPT-Verlauf, `jcmd`).
 - **TLS:** `dashboard.https.enabled` mit `mode` `self-signed`, `keystore` oder `pem`. Aus bleibt HTTP. Paper- und Vanilla-Jars werden beim Download per SHA-256 bzw. SHA-1 geprüft, Modrinth-Dateien per SHA-1.
+- **Server, Aufgaben, Backup, Versionen:** Profilwechsel, Start/Stopp, Cron-Lauf, Zip-Backup, JDBC-Test, Versionsliste. Die Liste schreibt nichts in die Config. `config.yml` und `server.properties` bleiben Rohtext. `?server=<id>` wählt das Profil; der Schalter im Kopf setzt `focusServer`.
+- **Mehrere Profile:** `servers.<id>` neben dem Wurzelprofil. `allowParallel: false` hält einen Child. Spigot-Jars entstehen erst beim Start über BuildTools. Backup-Zips und die JDBC-Verbindung entstehen erst beim Backup. Es wird keine lokale Datenbank installiert.
 
-Aufsicht, Dateibaum, Konsole und Archiv-Idee folgen Pterodactyl Wings und Crafty Controller. Der MSPT-Verlauf folgt der Darstellung von spark, die Werte kommen nur aus dem Vanilla-Befehl `tick query`. Mods kommen von der Modrinth-API und werden wie in Prism/Modrinth mit `.jar.disabled` abgeschaltet. Nichts davon lädt ein Mod in den Child, solange es nicht ausdrücklich installiert wird, und nichts davon ändert Spielregeln.
+Aufsicht, Dateibaum, Konsole und Archiv mit Prüfsumme folgen Pterodactyl Wings. Zeitpläne, Zeitzonen und mehrere Versionen folgen Crafty Controller. Der MSPT-Verlauf folgt der Darstellung von spark, die Werte kommen nur aus dem Vanilla-Befehl `tick query`. Paper-Prüfsummen folgen Fill v3. Mods kommen von der Modrinth-API und werden wie in Prism/Modrinth mit `.jar.disabled` abgeschaltet. Spigot-Jars kommen aus dem offiziellen BuildTools. Nichts davon lädt ein Mod in den Child, solange es nicht ausdrücklich installiert wird, und nichts davon ändert Spielregeln.
 
 > **Sicherheitshinweis:** Ohne `dashboard.https.enabled` läuft das Dashboard über **unverschlüsseltes HTTP**. Passwort und Sitzungscookie können in fremden Netzen mitgelesen werden. Nur aus vertrauenswürdigen Netzen nutzen, starkes Passwort verwenden, bei Verdacht Passwort-Datei ändern und Spigot neu starten. Mit TLS setzt das Cookie `Secure`. Das Dashboard hat Vollzugriff auf den Child-Server (Konsole, Dateien).
 

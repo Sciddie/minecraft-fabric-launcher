@@ -23,7 +23,7 @@ final class OuterTuner {
             props.put("spawn-protection", "0"); props.put("sync-chunk-writes", "false");
             props.put("entity-broadcast-range-percentage", "10");
             Path sp = root.resolve("server.properties");
-            if (!sp.toAbsolutePath().startsWith(pl.workDir())) {
+            if (!insideChild(pl, sp)) {
                 String before = Files.exists(sp) ? Files.readString(sp) : "";
                 FabricLauncherPlugin.updateProperties(sp, props, Map.of());
                 if (!before.equals(Files.readString(sp))) changed.add("server.properties");
@@ -61,6 +61,15 @@ final class OuterTuner {
             catch (Exception ignored) {}
         }
         if (!changed.isEmpty()) pl.getLogger().info("Outer server neutered: patched " + changed + " (effective on next Spigot start)");
+    }
+
+    private static boolean insideChild(FabricLauncherPlugin pl, Path file) {
+        Path abs = file.toAbsolutePath().normalize();
+        for (Path wd : pl.workDirs()) {
+            Path root = wd.toAbsolutePath().normalize();
+            if (abs.startsWith(root)) return true;
+        }
+        return false;
     }
 
     private static boolean patchYaml(FabricLauncherPlugin pl, Path f, Map<String, Object> vals) {

@@ -35,7 +35,7 @@ final class Dashboard {
     private ExecutorService pool;
     private String password;
     private boolean tls;
-    private volatile long lastCpuTicks = -1, lastCpuWall;
+    private volatile long lastCpuTicks = -1, lastCpuWall, lastCpuPid = -1;
     private volatile double lastCpuPct;
 
     Dashboard(FabricLauncherPlugin pl) { this.pl = pl; }
@@ -122,50 +122,76 @@ final class Dashboard {
             if (!authed(ex)) { json(ex, 401, Map.of("error", "Nicht angemeldet")); return; }
             if (method.equals("POST") && !"1".equals(ex.getRequestHeaders().getFirst("X-FL"))) { json(ex, 403, Map.of("error", "CSRF")); return; }
             Map<String, String> q = query(ex);
+            String sid = q.getOrDefault("server", "");
+            if (sid.isBlank()) sid = pl.focusId();
             switch (method + " " + path) {
                 case "POST /api/logout" -> { sessions.remove(token(ex)); ex.getResponseHeaders().add("Set-Cookie", cookie("", 0)); json(ex, 200, Map.of("ok", true)); }
-                case "GET /api/status" -> json(ex, 200, status());
-                case "GET /api/console" -> json(ex, 200, pl.console.snapshot());
-                case "GET /api/console/stream" -> sse(ex);
+                case "GET /api/status" -> json(ex, 200, status(sid));
+                case "GET /api/servers" -> json(ex, 200, serverList());
+                case "POST /api/focus" -> {
+                    String id = q.getOrDefault("id", "");
+                    if (id.isBlank()) id = body(ex, o -> o.has("id") ? o.get("id").getAsString() : "");
+                    if (id.isBlank()) { json(ex, 400, Map.of("error", "id")); return; }
+                    pl.focus(id);
+                    json(ex, 200, Map.of("ok", true, "focus", pl.focusId()));
+                }
+                case "GET /api/console" -> json(ex, 200, pl.console(sid).snapshot());
+                case "GET /api/console/stream" -> sse(ex, sid);
                 case "POST /api/cmd" -> {
                     String c = body(ex, obj -> obj.get("command").getAsString()).trim();
                     if (c.isEmpty()) { json(ex, 400, Map.of("error", "leer")); return; }
-                    pl.console.add("> " + c);
-                    json(ex, 200, Map.of("ok", pl.sendCommand(c)));
+                    pl.console(sid).add("> " + c);
+                    json(ex, 200, Map.of("ok", pl.sendCommand(sid, c)));
                 }
                 case "POST /api/action" -> {
                     String a = q.getOrDefault("do", "");
                     switch (a) {
-                        case "start" -> pl.requestStart();
-                        case "stop" -> pl.requestStop();
-                        case "restart" -> pl.requestRestart();
+                        case "start" -> pl.requestStart(sid);
+                        case "stop" -> pl.requestStop(sid);
+                        case "restart" -> pl.requestRestart(sid);
                         default -> { json(ex, 400, Map.of("error", "unknown action")); return; }
                     }
-                    pl.info("Dashboard action: " + a + " from " + ip(ex));
+                    pl.info(sid, "Dashboard action: " + a + " from " + ip(ex));
                     json(ex, 200, Map.of("ok", true));
                 }
-                case "GET /api/props" -> text(ex, readOr(pl.workDir().resolve("server.properties")));
-                case "POST /api/props" -> saveProps(ex);
+                case "GET /api/props" -> text(ex, readOr(pl.workDir(sid).resolve("server.properties")));
+                case "POST /api/props" -> saveProps(ex, sid);
                 case "GET /api/config" -> text(ex, readOr(pl.getDataFolder().toPath().resolve("config.yml")));
                 case "POST /api/config" -> saveConfig(ex);
-                case "GET /api/players" -> players(ex);
-                case "GET /api/fs/list" -> fsList(ex, q);
-                case "GET /api/fs/read" -> fsRead(ex, q);
-                case "GET /api/fs/download" -> fsDownload(ex, q);
-                case "POST /api/fs/write" -> fsWrite(ex, q);
-                case "POST /api/fs/upload" -> fsUpload(ex, q);
-                case "POST /api/fs/rename" -> fsRename(ex);
-                case "POST /api/fs/mkdir" -> fsMkdir(ex, q);
-                case "POST /api/fs/delete" -> fsDelete(ex);
-                case "GET /api/mods" -> json(ex, 200, ModAdmin.list(pl.workDir()).stream().map(Dashboard::modJson).toList());
-                case "GET /api/mods/search" -> json(ex, 200, ModAdmin.search(pl.upstream(), pl.getConfig().getString("type"), q.getOrDefault("q", "")));
-                case "POST /api/mods/toggle" -> modToggle(ex);
-                case "POST /api/mods/install" -> modInstall(ex);
-                case "GET /api/diag" -> json(ex, 200, pl.diagMap());
-                case "POST /api/diag/threaddump" -> json(ex, 200, Map.of("text", pl.jcmd("Thread.print")));
-                case "POST /api/diag/heap" -> json(ex, 200, Map.of("text", pl.jcmd("GC.heap_info")));
-                case "POST /api/diag/flags" -> json(ex, 200, Map.of("text", pl.jcmd("VM.flags")));
-                case "GET /api/logs" -> logs(ex, q);
+                case "GET /api/players" -> players(ex, sid);
+                case "GET /api/fs/list" -> fsList(ex, q, sid);
+                case "GET /api/fs/read" -> fsRead(ex, q, sid);
+                case "GET /api/fs/download" -> fsDownload(ex, q, sid);
+                case "POST /api/fs/write" -> fsWrite(ex, q, sid);
+                case "POST /api/fs/upload" -> fsUpload(ex, q, sid);
+                case "POST /api/fs/rename" -> fsRename(ex, sid);
+                case "POST /api/fs/mkdir" -> fsMkdir(ex, q, sid);
+                case "POST /api/fs/delete" -> fsDelete(ex, sid);
+                case "GET /api/mods" -> json(ex, 200, ModAdmin.list(pl.workDir(sid)).stream().map(Dashboard::modJson).toList());
+                case "GET /api/mods/search" -> json(ex, 200, ModAdmin.search(pl.upstream(), pl.profile(sid).type, q.getOrDefault("q", "")));
+                case "POST /api/mods/toggle" -> modToggle(ex, sid);
+                case "POST /api/mods/install" -> modInstall(ex, sid);
+                case "GET /api/diag" -> json(ex, 200, pl.diagMap(sid));
+                case "POST /api/diag/threaddump" -> json(ex, 200, Map.of("text", pl.jcmd(sid, "Thread.print")));
+                case "POST /api/diag/heap" -> json(ex, 200, Map.of("text", pl.jcmd(sid, "GC.heap_info")));
+                case "POST /api/diag/flags" -> json(ex, 200, Map.of("text", pl.jcmd(sid, "VM.flags")));
+                case "GET /api/logs" -> logs(ex, q, sid);
+                case "GET /api/tasks" -> json(ex, 200, pl.tasks().stream().map(Dashboard::taskJson).toList());
+                case "POST /api/tasks/run" -> {
+                    String id = q.getOrDefault("id", "");
+                    TaskDef found = null;
+                    for (TaskDef t : pl.tasks()) if (t.id.equals(id)) found = t;
+                    if (found == null) { json(ex, 404, Map.of("error", "unknown task")); return; }
+                    pl.runTask(found);
+                    json(ex, 200, Map.of("ok", true, "id", id));
+                }
+                case "GET /api/versions" -> {
+                    String type = q.getOrDefault("type", "fabric");
+                    json(ex, 200, Map.of("type", type, "versions", pl.versions(type)));
+                }
+                case "GET /api/backup" -> json(ex, 200, Map.of("last", pl.lastBackup == null ? "" : pl.lastBackup));
+                case "POST /api/backup" -> json(ex, 200, Map.of("ok", true, "last", pl.runBackup(sid)));
+                case "POST /api/backup/test" -> { pl.testBackupDb(); json(ex, 200, Map.of("ok", true)); }
                 default -> json(ex, 404, Map.of("error", "Not found"));
             }
         } catch (SecurityException e) {
@@ -225,26 +251,53 @@ final class Dashboard {
     }
 
     // ---------------- status ----------------
-    private Map<String, Object> status() {
+    private Map<String, Object> status(String id) {
+        ServerProfile pr = pl.profile(id);
+        ChildSlot slot = pl.slot(id);
         Map<String, Object> m = new LinkedHashMap<>();
-        long pid = pl.pid();
-        m.put("running", pl.running());
+        long pid = slot.pid();
+        m.put("id", pr.id);
+        m.put("running", slot.running());
         m.put("pid", pid);
-        m.put("uptime", pl.uptimeMillis() / 1000);
-        m.put("status", pl.lastStatus());
-        m.put("type", pl.getConfig().getString("type"));
-        m.put("mcVersion", pl.getConfig().getString("mcVersion"));
-        m.put("address", pl.getConfig().getString("serverIp", "") + ":" + pl.getConfig().getInt("port"));
-        m.put("xmx", pl.getConfig().getString("memory.xmx"));
-        m.put("players", new TreeSet<>(pl.onlinePlayers));
+        m.put("uptime", slot.uptimeMillis() / 1000);
+        m.put("status", slot.lastStatus);
+        m.put("type", pr.type);
+        m.put("mcVersion", pr.mcVersion);
+        m.put("address", (pr.serverIp == null ? "" : pr.serverIp) + ":" + pr.port);
+        m.put("xmx", pr.xmx);
+        m.put("players", new TreeSet<>(slot.onlinePlayers));
         m.put("tls", pl.dashboardTls());
-        m.put("msptHistory", pl.msptHistory());
+        m.put("focus", pl.focusId());
+        m.put("allowParallel", pl.allowParallel());
+        m.put("servers", serverList());
+        m.put("msptHistory", slot.msptHistory());
+        m.put("lastBackup", pl.lastBackup == null ? "" : pl.lastBackup);
         if (pid > 0) {
             m.put("cpu", cpu(pid)); m.put("rssMb", rssMb(pid)); m.put("threads", procField(pid, "Threads:"));
-            pl.maybeQueryChildTick();
-            if (System.currentTimeMillis() - pl.childTickAt < 60_000) { m.put("tps", pl.childTps); m.put("mspt", pl.childMspt); }
+            pl.maybeQueryChildTick(id);
+            if (System.currentTimeMillis() - slot.tickAt < 60_000) { m.put("tps", slot.tps); m.put("mspt", slot.mspt); }
         }
         m.put("spigot", spigotStats());
+        return m;
+    }
+
+    private List<Map<String, Object>> serverList() {
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (ServerProfile p : pl.profiles()) {
+            Map<String, Object> v = new LinkedHashMap<>(p.view());
+            v.put("running", pl.running(p.id));
+            v.put("pid", pl.pid(p.id));
+            v.put("status", pl.lastStatus(p.id));
+            v.put("focus", p.id.equals(pl.focusId()));
+            out.add(v);
+        }
+        return out;
+    }
+
+    private static Map<String, Object> taskJson(TaskDef t) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", t.id); m.put("enabled", t.enabled); m.put("cron", t.cron); m.put("timezone", t.timezone);
+        m.put("action", t.action); m.put("command", t.command); m.put("server", t.server);
         return m;
     }
 
@@ -284,6 +337,7 @@ final class Dashboard {
             long ticks = Long.parseLong(f[11]) + Long.parseLong(f[12]); // utime, stime
             long now = System.nanoTime();
             synchronized (this) {
+                if (pid != lastCpuPid) { lastCpuTicks = -1; lastCpuPid = pid; }
                 if (lastCpuTicks >= 0 && ticks >= lastCpuTicks && now - lastCpuWall > 500_000_000L) {
                     double secs = (now - lastCpuWall) / 1e9;
                     lastCpuPct = Math.round((ticks - lastCpuTicks) / 100.0 / secs * 1000) / 10.0; // % of one core, CLK_TCK=100
@@ -302,10 +356,10 @@ final class Dashboard {
         return -1;
     }
 
-    private void players(HttpExchange ex) throws IOException {
+    private void players(HttpExchange ex, String sid) throws IOException {
         Map<String, Object> m = new LinkedHashMap<>();
         for (String n : List.of("whitelist", "ops", "banned-players")) {
-            Path f = pl.workDir().resolve(n + ".json");
+            Path f = pl.workDir(sid).resolve(n + ".json");
             List<String> names = new ArrayList<>();
             try {
                 if (Files.exists(f)) for (JsonElement e : JsonParser.parseString(Files.readString(f)).getAsJsonArray())
@@ -313,18 +367,18 @@ final class Dashboard {
             } catch (Exception ignored) {}
             m.put(n, names);
         }
-        m.put("online", new TreeSet<>(pl.onlinePlayers));
+        m.put("online", new TreeSet<>(pl.players(sid)));
         json(ex, 200, m);
     }
 
     // ---------------- console SSE ----------------
-    private void sse(HttpExchange ex) throws IOException {
+    private void sse(HttpExchange ex, String sid) throws IOException {
         ex.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
         ex.getResponseHeaders().set("Cache-Control", "no-cache");
         ex.sendResponseHeaders(200, 0);
         BlockingQueue<String> q = new LinkedBlockingQueue<>(5000);
         Consumer<String> l = q::offer;
-        List<String> hist = pl.console.subscribe(l);
+        List<String> hist = pl.console(sid).subscribe(l);
         try (OutputStream os = ex.getResponseBody()) {
             StringBuilder sb = new StringBuilder();
             for (String s : hist) sb.append("data: ").append(gson.toJson(s)).append("\n\n");
@@ -340,31 +394,20 @@ final class Dashboard {
             }
         } catch (IOException | InterruptedException ignored) {
         } finally {
-            pl.console.unsubscribe(l);
+            pl.console(sid).unsubscribe(l);
         }
     }
 
     // ---------------- editors ----------------
-    private void saveProps(HttpExchange ex) throws IOException {
+    private void saveProps(HttpExchange ex, String sid) throws IOException {
         String txt = readBodyText(ex);
         Properties p = new Properties();
         p.load(new StringReader(txt)); // validate
-        Path f = pl.workDir().resolve("server.properties");
+        Path f = pl.workDir(sid).resolve("server.properties");
         Files.createDirectories(f.getParent());
         Files.writeString(f, txt, StandardCharsets.UTF_8);
-        // keep launcher-managed keys in sync so the next start does not revert the edit
-        boolean changed = false;
-        for (String k : p.stringPropertyNames()) {
-            if (pl.getConfig().isSet("serverProperties." + k) && !p.getProperty(k).equals(String.valueOf(pl.getConfig().get("serverProperties." + k)))) {
-                pl.getConfig().set("serverProperties." + k, FabricLauncherPlugin.parseValue(p.getProperty(k))); changed = true;
-            }
-        }
-        if (p.getProperty("server-port") != null && !p.getProperty("server-port").equals(String.valueOf(pl.getConfig().getInt("port")))) {
-            try { pl.getConfig().set("port", Integer.parseInt(p.getProperty("server-port").trim())); changed = true; } catch (NumberFormatException ignored) {}
-        }
-        if (p.getProperty("server-ip") != null && !p.getProperty("server-ip").equals(pl.getConfig().getString("serverIp", ""))) { pl.getConfig().set("serverIp", p.getProperty("server-ip")); changed = true; }
-        if (changed) pl.saveConfigWritable();
-        pl.info("server.properties saved via dashboard" + (changed ? " (config.yml synced)" : ""));
+        boolean changed = pl.syncPropertiesEdit(sid, p);
+        pl.info(sid, "server.properties saved via dashboard" + (changed ? " (config.yml synced)" : ""));
         json(ex, 200, Map.of("ok", true, "hint", "Wird beim nächsten Neustart des Servers aktiv."));
     }
 
@@ -376,18 +419,19 @@ final class Dashboard {
         Files.writeString(f, txt, StandardCharsets.UTF_8);
         FabricLauncherPlugin.makeWritable(f, false);
         pl.reloadConfig();
+        pl.reloadProfiles();
         pl.info("config.yml saved via dashboard");
         json(ex, 200, Map.of("ok", true, "hint", "Gespeichert. Wirkt beim nächsten Neustart des Child-Servers (Dashboard-Port/Passwort erst nach Spigot-Neustart)."));
     }
 
     // ---------------- file browser ----------------
-    private PathGuard guard() throws IOException { return PathGuard.open(pl.workDir()); }
-    private Path root() throws IOException { return guard().root(); }
-    private Path safe(String rel) throws IOException { return guard().resolve(rel); }
-    private String rel(Path p) throws IOException { return guard().relativize(p); }
+    private PathGuard guard(String sid) throws IOException { return PathGuard.open(pl.workDir(sid)); }
+    private Path root(String sid) throws IOException { return guard(sid).root(); }
+    private Path safe(String sid, String rel) throws IOException { return guard(sid).resolve(rel); }
+    private String rel(String sid, Path p) throws IOException { return guard(sid).relativize(p); }
 
-    private void fsList(HttpExchange ex, Map<String, String> q) throws IOException {
-        Path d = safe(q.get("path"));
+    private void fsList(HttpExchange ex, Map<String, String> q, String sid) throws IOException {
+        Path d = safe(sid, q.get("path"));
         if (!Files.isDirectory(d)) { json(ex, 404, Map.of("error", "Kein Ordner")); return; }
         List<Map<String, Object>> out = new ArrayList<>();
         try (DirectoryStream<Path> ds = Files.newDirectoryStream(d)) {
@@ -397,11 +441,11 @@ final class Dashboard {
             }
         }
         out.sort(Comparator.comparing((Map<String, Object> m) -> !(Boolean) m.get("dir")).thenComparing(m -> ((String) m.get("name")).toLowerCase(Locale.ROOT)));
-        json(ex, 200, Map.of("path", rel(d), "entries", out));
+        json(ex, 200, Map.of("path", rel(sid, d), "entries", out));
     }
 
-    private void fsRead(HttpExchange ex, Map<String, String> q) throws IOException {
-        Path f = safe(q.get("path"));
+    private void fsRead(HttpExchange ex, Map<String, String> q, String sid) throws IOException {
+        Path f = safe(sid, q.get("path"));
         if (!Files.isRegularFile(f)) { json(ex, 404, Map.of("error", "Keine Datei")); return; }
         if (f.toString().endsWith(".gz")) {
             try (InputStream in = new GZIPInputStream(Files.newInputStream(f))) {
@@ -424,8 +468,8 @@ final class Dashboard {
         text(ex, Files.readString(f, StandardCharsets.UTF_8));
     }
 
-    private void fsDownload(HttpExchange ex, Map<String, String> q) throws IOException {
-        Path f = safe(q.get("path"));
+    private void fsDownload(HttpExchange ex, Map<String, String> q, String sid) throws IOException {
+        Path f = safe(sid, q.get("path"));
         if (!Files.isRegularFile(f)) { json(ex, 404, Map.of("error", "Keine Datei")); return; }
         ex.getResponseHeaders().set("Content-Type", "application/octet-stream");
         ex.getResponseHeaders().set("Content-Disposition", "attachment; filename=\"" + f.getFileName().toString().replaceAll("[\"\\\\\\r\\n]", "_") + "\"");
@@ -433,20 +477,20 @@ final class Dashboard {
         try (OutputStream os = ex.getResponseBody()) { Files.copy(f, os); }
     }
 
-    private void fsWrite(HttpExchange ex, Map<String, String> q) throws IOException {
-        Path f = safe(q.get("path"));
+    private void fsWrite(HttpExchange ex, Map<String, String> q, String sid) throws IOException {
+        Path f = safe(sid, q.get("path"));
         if (Files.isDirectory(f)) { json(ex, 400, Map.of("error", "Ist ein Ordner")); return; }
         String txt = readBodyText(ex);
         Files.writeString(f, txt, StandardCharsets.UTF_8);
-        pl.info("File saved via dashboard: " + rel(f));
+        pl.info(sid, "File saved via dashboard: " + rel(sid, f));
         json(ex, 200, Map.of("ok", true));
     }
 
-    private void fsUpload(HttpExchange ex, Map<String, String> q) throws IOException {
-        Path dir = safe(q.get("path"));
+    private void fsUpload(HttpExchange ex, Map<String, String> q, String sid) throws IOException {
+        Path dir = safe(sid, q.get("path"));
         String name = q.getOrDefault("name", "");
         if (name.isBlank() || name.contains("/") || name.contains("\\") || name.equals("..") || name.equals(".")) { json(ex, 400, Map.of("error", "Ungültiger Name")); return; }
-        Path f = safe(rel(dir) + "/" + name);
+        Path f = safe(sid, rel(sid, dir) + "/" + name);
         if (Files.exists(f) && !"1".equals(q.get("overwrite"))) { json(ex, 409, Map.of("error", "Datei existiert bereits")); return; }
         Path tmp = f.resolveSibling(name + ".upload-part");
         long n = 0;
@@ -455,34 +499,34 @@ final class Dashboard {
             while ((r = in.read(buf)) > 0) { n += r; if (n > MAX_UPLOAD) throw new IOException("Upload zu groß (max 1 GB)"); os.write(buf, 0, r); }
         } catch (IOException e) { Files.deleteIfExists(tmp); throw e; }
         Files.move(tmp, f, StandardCopyOption.REPLACE_EXISTING);
-        pl.info("File uploaded via dashboard: " + rel(f) + " (" + n + " bytes)");
+        pl.info(sid, "File uploaded via dashboard: " + rel(sid, f) + " (" + n + " bytes)");
         json(ex, 200, Map.of("ok", true));
     }
 
-    private void fsRename(HttpExchange ex) throws IOException {
+    private void fsRename(HttpExchange ex, String sid) throws IOException {
         JsonObject o = JsonParser.parseString(readBodyText(ex)).getAsJsonObject();
-        Path from = safe(o.get("from").getAsString()), to = safe(o.get("to").getAsString());
-        if (from.equals(root())) throw new SecurityException("Wurzelordner kann nicht umbenannt werden");
+        Path from = safe(sid, o.get("from").getAsString()), to = safe(sid, o.get("to").getAsString());
+        if (from.equals(root(sid))) throw new SecurityException("Wurzelordner kann nicht umbenannt werden");
         if (Files.exists(to)) { json(ex, 409, Map.of("error", "Ziel existiert bereits")); return; }
         Files.move(from, to);
-        pl.info("Renamed via dashboard: " + rel(from) + " -> " + rel(to));
+        pl.info(sid, "Renamed via dashboard: " + rel(sid, from) + " -> " + rel(sid, to));
         json(ex, 200, Map.of("ok", true));
     }
 
-    private void fsMkdir(HttpExchange ex, Map<String, String> q) throws IOException {
-        Path d = safe(q.get("path"));
+    private void fsMkdir(HttpExchange ex, Map<String, String> q, String sid) throws IOException {
+        Path d = safe(sid, q.get("path"));
         Files.createDirectories(d);
         json(ex, 200, Map.of("ok", true));
     }
 
     /** Deletes a single file or EMPTY folder; requires confirm == file name (UI asks the user). */
-    private void fsDelete(HttpExchange ex) throws IOException {
+    private void fsDelete(HttpExchange ex, String sid) throws IOException {
         JsonObject o = JsonParser.parseString(readBodyText(ex)).getAsJsonObject();
-        Path p = safe(o.get("path").getAsString());
-        if (p.equals(root())) throw new SecurityException("Wurzelordner kann nicht gelöscht werden");
+        Path p = safe(sid, o.get("path").getAsString());
+        if (p.equals(root(sid))) throw new SecurityException("Wurzelordner kann nicht gelöscht werden");
         if (!o.has("confirm") || !o.get("confirm").getAsString().equals(p.getFileName().toString())) { json(ex, 400, Map.of("error", "Bestätigung fehlt")); return; }
         Files.delete(p); // throws if non-empty directory
-        pl.info("Deleted via dashboard: " + rel(p));
+        pl.info(sid, "Deleted via dashboard: " + rel(sid, p));
         json(ex, 200, Map.of("ok", true));
     }
 
@@ -494,28 +538,29 @@ final class Dashboard {
         return m;
     }
 
-    private void modToggle(HttpExchange ex) throws IOException {
+    private void modToggle(HttpExchange ex, String sid) throws IOException {
         JsonObject o = JsonParser.parseString(readBodyText(ex)).getAsJsonObject();
-        String path = ModAdmin.toggle(guard(), o.get("path").getAsString(), o.has("confirm") ? o.get("confirm").getAsString() : "");
-        pl.info("Mod toggled via dashboard: " + path);
+        String path = ModAdmin.toggle(guard(sid), o.get("path").getAsString(), o.has("confirm") ? o.get("confirm").getAsString() : "");
+        pl.info(sid, "Mod toggled via dashboard: " + path);
         json(ex, 200, Map.of("ok", true, "path", path));
     }
 
-    private void modInstall(HttpExchange ex) throws Exception {
+    private void modInstall(HttpExchange ex, String sid) throws Exception {
         JsonObject o = JsonParser.parseString(readBodyText(ex)).getAsJsonObject();
         String slug = o.get("slug").getAsString();
         String version = o.has("version") && !o.get("version").isJsonNull() ? o.get("version").getAsString() : "";
-        var r = ModAdmin.install(pl.upstream(), pl.workDir(), pl.getConfig().getString("type"), pl.getConfig().getString("mcVersion"), slug, version);
-        pl.info("Mod installed via dashboard: " + r.get("path"));
+        ServerProfile pr = pl.profile(sid);
+        var r = ModAdmin.install(pl.upstream(), pr.directory(), pr.type, pr.mcVersion, slug, version);
+        pl.info(sid, "Mod installed via dashboard: " + r.get("path"));
         json(ex, 200, r);
     }
 
-    private void logs(HttpExchange ex, Map<String, String> q) throws IOException {
+    private void logs(HttpExchange ex, Map<String, String> q, String sid) throws IOException {
         String name = q.getOrDefault("file", "latest.log");
         if (name.contains("/") || name.contains("\\") || name.contains("..")) throw new SecurityException("Pfad außerhalb des Server-Ordners");
         int limit = parseInt(q.get("limit"), 2000);
         int maxBytes = parseInt(q.get("maxBytes"), 4 * 1024 * 1024);
-        LogQuery.Result r = LogQuery.query(safe("logs/" + name), q.getOrDefault("level", "all"), q.getOrDefault("q", ""), limit, maxBytes);
+        LogQuery.Result r = LogQuery.query(safe(sid, "logs/" + name), q.getOrDefault("level", "all"), q.getOrDefault("q", ""), limit, maxBytes);
         json(ex, 200, Map.of("file", name, "truncated", r.truncated(), "lines", r.lines()));
     }
 

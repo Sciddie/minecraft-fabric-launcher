@@ -10,7 +10,7 @@ Alle Ports, Pfade und Standardwerte unten stammen aus `src/main/resources/config
 
 1. Hoster: Spigot mit **Java 25**, genug RAM, zwei freien Zusatzports.
 2. Äußere `server.properties` / `bukkit.yml` / `spigot.yml` aus `spigot-minimal-config/` übernehmen, **ohne** den Spigot-Port des Hosters zu ändern.
-3. `FabricLauncher-1.1.0.jar` nach `plugins/` laden.
+3. `FabricLauncher-1.2.0-pre.1.jar` nach `plugins/` laden.
 4. Spigot starten und warten, bis Fabric-Jar und Mods da sind.
 5. Spigot einmal **sauber** neu starten, damit die OuterTuner-Änderungen gelten.
 6. Im Spiel `<SERVER-IP>:<Fabric-Port>` nutzen, Dashboard im Browser über den Dashboard-Port.
@@ -72,13 +72,13 @@ Auf einem Rechner mit **JDK 25** und Maven, im Repository-Root (`pom.xml` liegt 
 mvn package
 ```
 
-Maven holt `spigot-api` `26.3-R0.1-SNAPSHOT` von `https://hub.spigotmc.org/nexus/content/repositories/snapshots/`. Das Ergebnis ist `target/FabricLauncher-1.1.0.jar` (`finalName` ist `FabricLauncher-${project.version}`, Version `1.1.0`).
+Maven holt `spigot-api` `26.3-R0.1-SNAPSHOT` von `https://hub.spigotmc.org/nexus/content/repositories/snapshots/`. Das Ergebnis ist `target/FabricLauncher-1.2.0-pre.1.jar` (`finalName` ist `FabricLauncher-${project.version}`, Version `1.2.0-pre.1`).
 
 `worldporter/` ist ein zweites, stillgelegtes Projekt. Es nicht bauen und nicht installieren.
 
 ### Fertiges Jar
 
-Wenn du `FabricLauncher-1.1.0.jar` schon hast, diesen Build-Schritt weglassen und genau diese Datei hochladen. Im Repo liegt kein vorgebautes Jar.
+Wenn du `FabricLauncher-1.2.0-pre.1.jar` schon hast, diesen Build-Schritt weglassen und genau diese Datei hochladen. Im Repo liegt kein vorgebautes Jar.
 
 ## 3. Äußeren Spigot vorbereiten
 
@@ -110,7 +110,7 @@ Spigot muss dabei aus sein, wenn du die äußeren Yml/Properties schreibst.
 ```
 <Spigot-Root>/
 ├── plugins/
-│   └── FabricLauncher-1.1.0.jar    ← nur das Jar, nichts anderes aus dem Repo
+│   └── FabricLauncher-1.2.0-pre.1.jar    ← nur das Jar, nichts anderes aus dem Repo
 ├── server.properties               ← äußerer Spigot, Port des Hosters behalten
 ├── bukkit.yml
 ├── spigot.yml
@@ -185,7 +185,7 @@ Datei: `plugins/FabricLauncher/config.yml`. Änderungen an Child-Optionen gelten
 
 | Schlüssel | Standard | Bedeutung |
 |---|---|---|
-| `type` | `fabric` | `fabric`, `paper`, `vanilla` oder `custom`. Paper lädt über `fill.papermc.io` (STABLE, sonst der erste Build). Vanilla lädt über das Mojang-Manifest. `custom` startet nur `customJar`, ohne Mod-Download. |
+| `type` | `fabric` | `fabric`, `paper`, `spigot`, `vanilla` oder `custom`. Paper lädt über `fill.papermc.io` (STABLE, sonst der erste Build). Vanilla lädt über das Mojang-Manifest. `spigot` baut das Jar erst beim Start mit BuildTools (`plugins/FabricLauncher/buildtools/`, `git` muss liegen). `custom` startet nur `customJar`, ohne Mod-Download. |
 | `mcVersion` | `"26.3"` | Minecraft-Version des Child. Steckt im Jar-Namen `fabric-server-launch-<mcVersion>.jar` und in der Modrinth-Abfrage. |
 | `port` | `2063` | Wird bei jedem Child-Start als `server-port` erzwungen. Muss ein freier, weitergeleiteter Port sein. |
 | `serverIp` | `"0.0.0.0"` | Bind-Adresse. `""` = alle Schnittstellen. Kein Hostname und nicht `<SERVER-IP>` eintragen, wenn das keine lokale Bind-Adresse ist. |
@@ -214,7 +214,17 @@ Datei: `plugins/FabricLauncher/config.yml`. Änderungen an Child-Optionen gelten
 | `dashboard.https.enabled` | `false` | `true` startet das Dashboard als HTTPS. Material entsteht erst dann. |
 | `dashboard.https.mode` | `self-signed` | `self-signed` (keytool-PKCS12), `keystore` (vorhandenes PKCS12/JKS) oder `pem` (Zertifikat + PKCS#8 oder RSA PKCS#1). |
 | `consoleBufferLines` | `4000` | Zeilen im Konsolen-Ring des Dashboards (200–20000). |
-| `neuterOuter` | `true` | OuterTuner an/aus. |
+| `serverId` | `default` | Id des Wurzelprofils (die Schlüssel auf oberster Ebene). |
+| `focusServer` | `default` | Profil für `/child` und das Dashboard ohne `?server=`. |
+| `allowParallel` | `false` | `false`: ein Start stoppt die anderen Profile, Auto-Start nur für `focusServer`. `true`: jedes `autoStart` darf parallel laufen. |
+| `servers.<id>.*` | `{}` | Weiteres Profil. Erbt Memory, JVM-Flags, Args, `serverIp`, Fabric-Versionen und `serverProperties`. Mods werden nicht geerbt. Fehlt `workingDir`, gilt `./child-<id>`. Port setzen, sonst Kollision mit dem Wurzelport. |
+| `tasks` | `[]` | Cron mit fünf Feldern, `timezone` als ZoneId, `action` `command`/`save-all`/`start`/`stop`/`restart`/`backup`. DOM und DOW beide gesetzt = ODER. |
+| `backup.directory` | `""` | Leer = `plugins/FabricLauncher/backups`. Zip erst beim Backup. |
+| `backup.paths` | `[world]` | Pfade innerhalb des Profilordners. Symlinks werden übersprungen. |
+| `backup.keep` | `5` | Ältere Zips desselben Profils werden nach dem Dateinamen gelöscht. |
+| `backup.saveWaitSeconds` | `3` | Pause nach `save-all`, wenn der Prozess läuft. |
+| `backup.database.enabled` | `false` | Metadaten per JDBC. Keine lokale Datenbank. `driverJar` wird beim Schreiben geladen. |
+| `neuterOuter` | `true` | OuterTuner an/aus. Er fasst keinen Profilordner an. |
 
 Befehl statt Editor: `/child config set <pfad> <wert>`. `true`/`false` werden Boolean, ganze Zahlen Integer, `1.5` Double, `[list]a,b` eine Liste. Beispiel: `/child config set memory.xmx 7G`. Wirkt beim nächsten `/child restart`.
 

@@ -3,11 +3,11 @@ version: ${project.version}
 main: de.aichele.childlauncher.FabricLauncherPlugin
 api-version: '26.3'
 softdepend: [WorldPorter]
-description: Launches and supervises a child Minecraft server (Fabric/Paper/Vanilla/custom) on a second port.
+description: Launches and supervises child Minecraft servers (Fabric/Paper/Spigot/Vanilla/custom).
 commands:
   child:
     description: Control the child server
-    usage: /child <start|stop|restart|status|cmd|config|prop|mods|mod|diag|threaddump|heap|flags>
+    usage: /child <start|stop|restart|status|cmd|config|prop|mods|mod|diag|threaddump|heap|flags|servers|focus|tasks|task|backup|versions>
     permission: fabriclauncher.admin
 permissions:
   fabriclauncher.admin:

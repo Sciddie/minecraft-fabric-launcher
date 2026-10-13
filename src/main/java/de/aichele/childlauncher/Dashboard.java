@@ -2,8 +2,10 @@ package de.aichele.childlauncher;
 
 import com.google.gson.*;
 import com.sun.net.httpserver.*;
+import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
 
+import javax.net.ssl.SSLContext;
 import java.io.*;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
@@ -32,23 +34,53 @@ final class Dashboard {
     private HttpServer server;
     private ExecutorService pool;
     private String password;
+    private boolean tls;
     private volatile long lastCpuTicks = -1, lastCpuWall;
     private volatile double lastCpuPct;
 
     Dashboard(FabricLauncherPlugin pl) { this.pl = pl; }
 
-    void start() throws IOException {
+    void start() throws Exception {
         password = loadOrCreatePassword();
         String bind = pl.getConfig().getString("dashboard.bind", "");
         if (bind == null || bind.isBlank()) bind = pl.getConfig().getString("serverIp", "");
         if (bind == null || bind.isBlank()) bind = "0.0.0.0";
         int port = pl.getConfig().getInt("dashboard.port", 2064);
-        server = HttpServer.create(new InetSocketAddress(bind, port), 32);
+        InetSocketAddress addr = new InetSocketAddress(bind, port);
+        if (pl.getConfig().getBoolean("dashboard.https.enabled", false)) {
+            SSLContext ctx = HttpsSupport.build(pl.getDataFolder().toPath(), httpsSpec(pl.getConfig()), m -> pl.getLogger().info(m));
+            HttpsServer https = HttpsServer.create(addr, 32);
+            HttpsSupport.configure(https, ctx);
+            server = https;
+            tls = true;
+        } else {
+            server = HttpServer.create(addr, 32);
+            tls = false;
+        }
         pool = Executors.newCachedThreadPool(r -> { Thread t = new Thread(r, "FabricLauncher-Web"); t.setDaemon(true); return t; });
         server.setExecutor(pool);
         server.createContext("/", this::handle);
         server.start();
-        pl.getLogger().info("Dashboard listening on http://" + bind + ":" + port + "/");
+        pl.getLogger().info("Dashboard listening on " + (tls ? "https" : "http") + "://" + bind + ":" + port + "/");
+    }
+
+    boolean tls() { return tls; }
+
+    private static HttpsSupport.Spec httpsSpec(FileConfiguration c) {
+        return new HttpsSupport.Spec(
+                c.getString("dashboard.https.mode", "self-signed"),
+                c.getString("dashboard.https.keystore", "dashboard.p12"),
+                c.getString("dashboard.https.keystorePassword", ""),
+                c.getString("dashboard.https.keyPassword", ""),
+                c.getString("dashboard.https.cert", "dashboard.crt"),
+                c.getString("dashboard.https.key", "dashboard.key"),
+                c.getInt("dashboard.https.days", 825),
+                c.getString("dashboard.https.dn", "CN=FabricLauncher"),
+                c.getStringList("dashboard.https.sans"));
+    }
+
+    private String cookie(String token, long maxAge) {
+        return "FLS=" + token + "; Path=/; Max-Age=" + maxAge + "; HttpOnly; SameSite=Strict" + (tls ? "; Secure" : "");
     }
 
     void stop() {
@@ -81,6 +113,7 @@ final class Dashboard {
             ex.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
             ex.getResponseHeaders().set("X-Frame-Options", "DENY");
             ex.getResponseHeaders().set("Referrer-Policy", "no-referrer");
+            if (tls) ex.getResponseHeaders().set("Strict-Transport-Security", "max-age=31536000");
             String path = ex.getRequestURI().getPath();
             String method = ex.getRequestMethod();
             if (path.equals("/") || path.equals("/index.html")) { serveIndex(ex); return; }
@@ -90,7 +123,7 @@ final class Dashboard {
             if (method.equals("POST") && !"1".equals(ex.getRequestHeaders().getFirst("X-FL"))) { json(ex, 403, Map.of("error", "CSRF")); return; }
             Map<String, String> q = query(ex);
             switch (method + " " + path) {
-                case "POST /api/logout" -> { sessions.remove(cookie(ex)); ex.getResponseHeaders().add("Set-Cookie", "FLS=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"); json(ex, 200, Map.of("ok", true)); }
+                case "POST /api/logout" -> { sessions.remove(token(ex)); ex.getResponseHeaders().add("Set-Cookie", cookie("", 0)); json(ex, 200, Map.of("ok", true)); }
                 case "GET /api/status" -> json(ex, 200, status());
                 case "GET /api/console" -> json(ex, 200, pl.console.snapshot());
                 case "GET /api/console/stream" -> sse(ex);
@@ -124,10 +157,21 @@ final class Dashboard {
                 case "POST /api/fs/rename" -> fsRename(ex);
                 case "POST /api/fs/mkdir" -> fsMkdir(ex, q);
                 case "POST /api/fs/delete" -> fsDelete(ex);
+                case "GET /api/mods" -> json(ex, 200, ModAdmin.list(pl.workDir()).stream().map(Dashboard::modJson).toList());
+                case "GET /api/mods/search" -> json(ex, 200, ModAdmin.search(pl.upstream(), pl.getConfig().getString("type"), q.getOrDefault("q", "")));
+                case "POST /api/mods/toggle" -> modToggle(ex);
+                case "POST /api/mods/install" -> modInstall(ex);
+                case "GET /api/diag" -> json(ex, 200, pl.diagMap());
+                case "POST /api/diag/threaddump" -> json(ex, 200, Map.of("text", pl.jcmd("Thread.print")));
+                case "POST /api/diag/heap" -> json(ex, 200, Map.of("text", pl.jcmd("GC.heap_info")));
+                case "POST /api/diag/flags" -> json(ex, 200, Map.of("text", pl.jcmd("VM.flags")));
+                case "GET /api/logs" -> logs(ex, q);
                 default -> json(ex, 404, Map.of("error", "Not found"));
             }
         } catch (SecurityException e) {
             json(ex, 403, Map.of("error", e.getMessage()));
+        } catch (IllegalArgumentException e) {
+            json(ex, 400, Map.of("error", String.valueOf(e.getMessage())));
         } catch (Exception e) {
             pl.getLogger().log(Level.FINE, "Dashboard error", e);
             try { json(ex, 500, Map.of("error", String.valueOf(e.getMessage()))); } catch (Exception ignored) {}
@@ -151,7 +195,7 @@ final class Dashboard {
             String tok = HexFormat.of().formatHex(b);
             sessions.put(tok, now + SESSION_TTL);
             sessions.entrySet().removeIf(e -> e.getValue() < now);
-            ex.getResponseHeaders().add("Set-Cookie", "FLS=" + tok + "; Path=/; Max-Age=" + SESSION_TTL / 1000 + "; HttpOnly; SameSite=Strict");
+            ex.getResponseHeaders().add("Set-Cookie", cookie(tok, SESSION_TTL / 1000));
             pl.getLogger().info("Dashboard login from " + ip);
             json(ex, 200, Map.of("ok", true));
         } else {
@@ -166,14 +210,14 @@ final class Dashboard {
         }
     }
 
-    private String cookie(HttpExchange ex) {
+    private String token(HttpExchange ex) {
         for (String h : ex.getRequestHeaders().getOrDefault("Cookie", List.of()))
             for (String part : h.split(";")) { String p = part.trim(); if (p.startsWith("FLS=")) return p.substring(4); }
         return "";
     }
 
     private boolean authed(HttpExchange ex) {
-        String c = cookie(ex);
+        String c = token(ex);
         Long exp = c.isEmpty() ? null : sessions.get(c);
         if (exp == null) return false;
         if (exp < System.currentTimeMillis()) { sessions.remove(c); return false; }
@@ -193,6 +237,8 @@ final class Dashboard {
         m.put("address", pl.getConfig().getString("serverIp", "") + ":" + pl.getConfig().getInt("port"));
         m.put("xmx", pl.getConfig().getString("memory.xmx"));
         m.put("players", new TreeSet<>(pl.onlinePlayers));
+        m.put("tls", pl.dashboardTls());
+        m.put("msptHistory", pl.msptHistory());
         if (pid > 0) {
             m.put("cpu", cpu(pid)); m.put("rssMb", rssMb(pid)); m.put("threads", procField(pid, "Threads:"));
             pl.maybeQueryChildTick();
@@ -335,23 +381,10 @@ final class Dashboard {
     }
 
     // ---------------- file browser ----------------
-    private Path root() throws IOException { Path r = pl.workDir(); Files.createDirectories(r); return r.toRealPath(); }
-
-    /** Resolves a user path inside the child dir; rejects traversal and symlink escapes. */
-    private Path safe(String rel) throws IOException {
-        Path root = root();
-        if (rel == null) rel = "";
-        rel = rel.replace('\\', '/');
-        while (rel.startsWith("/")) rel = rel.substring(1);
-        Path p = root.resolve(rel).normalize();
-        if (!p.startsWith(root)) throw new SecurityException("Pfad außerhalb des Server-Ordners");
-        Path check = p;
-        while (check != null && !Files.exists(check, LinkOption.NOFOLLOW_LINKS)) check = check.getParent();
-        if (check == null || !check.toRealPath().startsWith(root)) throw new SecurityException("Pfad außerhalb des Server-Ordners");
-        return p;
-    }
-
-    private String rel(Path p) throws IOException { return root().relativize(p).toString().replace('\\', '/'); }
+    private PathGuard guard() throws IOException { return PathGuard.open(pl.workDir()); }
+    private Path root() throws IOException { return guard().root(); }
+    private Path safe(String rel) throws IOException { return guard().resolve(rel); }
+    private String rel(Path p) throws IOException { return guard().relativize(p); }
 
     private void fsList(HttpExchange ex, Map<String, String> q) throws IOException {
         Path d = safe(q.get("path"));
@@ -371,7 +404,12 @@ final class Dashboard {
         Path f = safe(q.get("path"));
         if (!Files.isRegularFile(f)) { json(ex, 404, Map.of("error", "Keine Datei")); return; }
         if (f.toString().endsWith(".gz")) {
-            try (InputStream in = new GZIPInputStream(Files.newInputStream(f))) { text(ex, new String(in.readNBytes((int) MAX_TEXT * 4), StandardCharsets.UTF_8)); }
+            try (InputStream in = new GZIPInputStream(Files.newInputStream(f))) {
+                byte[] b = in.readNBytes((int) MAX_TEXT + 1);
+                String s = new String(b, 0, Math.min(b.length, (int) MAX_TEXT), StandardCharsets.UTF_8);
+                if (b.length > MAX_TEXT) s += "\n[... gekürzt ...]";
+                text(ex, s);
+            }
             return;
         }
         if (Files.size(f) > MAX_TEXT) {
@@ -446,6 +484,44 @@ final class Dashboard {
         Files.delete(p); // throws if non-empty directory
         pl.info("Deleted via dashboard: " + rel(p));
         json(ex, 200, Map.of("ok", true));
+    }
+
+    private static Map<String, Object> modJson(ModAdmin.Entry e) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("path", e.path()); m.put("name", e.name()); m.put("folder", e.folder());
+        m.put("dir", e.directory()); m.put("toggleable", e.toggleable()); m.put("enabled", e.enabled());
+        m.put("size", e.size()); m.put("mtime", e.mtime());
+        return m;
+    }
+
+    private void modToggle(HttpExchange ex) throws IOException {
+        JsonObject o = JsonParser.parseString(readBodyText(ex)).getAsJsonObject();
+        String path = ModAdmin.toggle(guard(), o.get("path").getAsString(), o.has("confirm") ? o.get("confirm").getAsString() : "");
+        pl.info("Mod toggled via dashboard: " + path);
+        json(ex, 200, Map.of("ok", true, "path", path));
+    }
+
+    private void modInstall(HttpExchange ex) throws Exception {
+        JsonObject o = JsonParser.parseString(readBodyText(ex)).getAsJsonObject();
+        String slug = o.get("slug").getAsString();
+        String version = o.has("version") && !o.get("version").isJsonNull() ? o.get("version").getAsString() : "";
+        var r = ModAdmin.install(pl.upstream(), pl.workDir(), pl.getConfig().getString("type"), pl.getConfig().getString("mcVersion"), slug, version);
+        pl.info("Mod installed via dashboard: " + r.get("path"));
+        json(ex, 200, r);
+    }
+
+    private void logs(HttpExchange ex, Map<String, String> q) throws IOException {
+        String name = q.getOrDefault("file", "latest.log");
+        if (name.contains("/") || name.contains("\\") || name.contains("..")) throw new SecurityException("Pfad außerhalb des Server-Ordners");
+        int limit = parseInt(q.get("limit"), 2000);
+        int maxBytes = parseInt(q.get("maxBytes"), 4 * 1024 * 1024);
+        LogQuery.Result r = LogQuery.query(safe("logs/" + name), q.getOrDefault("level", "all"), q.getOrDefault("q", ""), limit, maxBytes);
+        json(ex, 200, Map.of("file", name, "truncated", r.truncated(), "lines", r.lines()));
+    }
+
+    private static int parseInt(String s, int fallback) {
+        if (s == null || s.isBlank()) return fallback;
+        try { return Integer.parseInt(s); } catch (NumberFormatException e) { return fallback; }
     }
 
     // ---------------- helpers ----------------

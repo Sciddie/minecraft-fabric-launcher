@@ -10,7 +10,7 @@ Alle Ports, Pfade und Standardwerte unten stammen aus `src/main/resources/config
 
 1. Hoster: Spigot mit **Java 25**, genug RAM, zwei freien Zusatzports.
 2. Äußere `server.properties` / `bukkit.yml` / `spigot.yml` aus `spigot-minimal-config/` übernehmen, **ohne** den Spigot-Port des Hosters zu ändern.
-3. `FabricLauncher-1.0.0.jar` nach `plugins/` laden.
+3. `FabricLauncher-1.1.0.jar` nach `plugins/` laden.
 4. Spigot starten und warten, bis Fabric-Jar und Mods da sind.
 5. Spigot einmal **sauber** neu starten, damit die OuterTuner-Änderungen gelten.
 6. Im Spiel `<SERVER-IP>:<Fabric-Port>` nutzen, Dashboard im Browser über den Dashboard-Port.
@@ -72,13 +72,13 @@ Auf einem Rechner mit **JDK 25** und Maven, im Repository-Root (`pom.xml` liegt 
 mvn package
 ```
 
-Maven holt `spigot-api` `26.3-R0.1-SNAPSHOT` von `https://hub.spigotmc.org/nexus/content/repositories/snapshots/`. Das Ergebnis ist `target/FabricLauncher-1.0.0.jar` (`finalName` ist `FabricLauncher-${project.version}`, Version `1.0.0`).
+Maven holt `spigot-api` `26.3-R0.1-SNAPSHOT` von `https://hub.spigotmc.org/nexus/content/repositories/snapshots/`. Das Ergebnis ist `target/FabricLauncher-1.1.0.jar` (`finalName` ist `FabricLauncher-${project.version}`, Version `1.1.0`).
 
 `worldporter/` ist ein zweites, stillgelegtes Projekt. Es nicht bauen und nicht installieren.
 
 ### Fertiges Jar
 
-Wenn du `FabricLauncher-1.0.0.jar` schon hast, diesen Build-Schritt weglassen und genau diese Datei hochladen. Im Repo liegt kein vorgebautes Jar.
+Wenn du `FabricLauncher-1.1.0.jar` schon hast, diesen Build-Schritt weglassen und genau diese Datei hochladen. Im Repo liegt kein vorgebautes Jar.
 
 ## 3. Äußeren Spigot vorbereiten
 
@@ -110,7 +110,7 @@ Spigot muss dabei aus sein, wenn du die äußeren Yml/Properties schreibst.
 ```
 <Spigot-Root>/
 ├── plugins/
-│   └── FabricLauncher-1.0.0.jar    ← nur das Jar, nichts anderes aus dem Repo
+│   └── FabricLauncher-1.1.0.jar    ← nur das Jar, nichts anderes aus dem Repo
 ├── server.properties               ← äußerer Spigot, Port des Hosters behalten
 ├── bukkit.yml
 ├── spigot.yml
@@ -211,6 +211,9 @@ Datei: `plugins/FabricLauncher/config.yml`. Änderungen an Child-Optionen gelten
 | `dashboard.enabled` | `true` | `false` startet keinen HTTP-Server. |
 | `dashboard.port` | `2064` | Port des Dashboards. |
 | `dashboard.bind` | `""` | Leer = `serverIp` verwenden. Ist auch das leer, bindet das Dashboard `0.0.0.0`. |
+| `dashboard.https.enabled` | `false` | `true` startet das Dashboard als HTTPS. Material entsteht erst dann. |
+| `dashboard.https.mode` | `self-signed` | `self-signed` (keytool-PKCS12), `keystore` (vorhandenes PKCS12/JKS) oder `pem` (Zertifikat + PKCS#8 oder RSA PKCS#1). |
+| `consoleBufferLines` | `4000` | Zeilen im Konsolen-Ring des Dashboards (200–20000). |
 | `neuterOuter` | `true` | OuterTuner an/aus. |
 
 Befehl statt Editor: `/child config set <pfad> <wert>`. `true`/`false` werden Boolean, ganze Zahlen Integer, `1.5` Double, `[list]a,b` eine Liste. Beispiel: `/child config set memory.xmx 7G`. Wirkt beim nächsten `/child restart`.
@@ -338,7 +341,7 @@ Passwort ändern: Datei ersetzen und **Spigot** neu starten. Ein `/child restart
 
 Sitzung 12 Stunden, Cookie `FLS`, `HttpOnly`, `SameSite=Strict`. Nach 5 Fehlversuchen sperrt die IP für 30 Sekunden, danach länger, bis höchstens 1 Stunde.
 
-Das Dashboard ist unverschlüsseltes HTTP und hat Vollzugriff auf Konsole und Dateien des Child. Nur aus einem Netz nutzen, dem du vertraust.
+Ohne `dashboard.https.enabled` ist das Dashboard unverschlüsseltes HTTP und hat Vollzugriff auf Konsole und Dateien des Child. Nur aus einem Netz nutzen, dem du vertraust. Mit `dashboard.https.enabled: true` spricht es TLS (`HttpsServer`). `mode: self-signed` legt beim Start `plugins/FabricLauncher/dashboard.p12` an (Passwort in `dashboard-keystore.pass`, falls in der Config leer) und trägt `localhost` sowie `127.0.0.1` als SAN ein, plus Einträge aus `dashboard.https.sans`. `mode: keystore` lädt eine vorhandene Datei. `mode: pem` erwartet Zertifikat und Schlüssel (PKCS#8 `BEGIN PRIVATE KEY` oder RSA PKCS#1). Das Sitzungscookie bekommt dann `Secure`. Ein fehlgeschlagenes TLS beendet nur das Dashboard, der Child kann weiterlaufen. `config.yml` und `server.properties` bleiben Rohtext.
 
 ## 12. Befehle
 
@@ -353,6 +356,12 @@ Permission `fabriclauncher.admin`, Standard **OP**. Konsole und RCON gelten als 
 | `child cmd <befehl>` | Zeile an die Child-Konsole, führendes `/` wird entfernt. Beispiel: `child cmd op Spieler`. |
 | `child config set <pfad> <wert>` | Schlüssel in `config.yml`. |
 | `child prop set <key> <wert>` | Ein Schlüssel in der Child-`server.properties`. |
+| `child mods` | Jars in `mods/` und `plugins/` (`.jar` an, `.jar.disabled` aus). |
+| `child mod search <text>` | Modrinth-Suche, passend zum `type`. |
+| `child mod install <slug> [version]` | Lädt das Jar erst auf diesen Befehl. Wirkt nach Neustart des Child. |
+| `child mod toggle <mods/datei.jar>` | Benennt `.jar` ↔ `.jar.disabled` um. |
+| `child diag` | RSS, Threads, FDs, MSPT, Plattenbelegung des Child-Ordners. |
+| `child threaddump` / `heap` / `flags` | `jcmd Thread.print`, `GC.heap_info`, `VM.flags`. Nur lesend. |
 
 `child restart` und `child stop` sind der normale Weg. Nicht den Java-Prozess des Child von außen killen.
 
@@ -383,8 +392,8 @@ Das Plugin kennt keine Domains. Minecraft-Java auf dem Fabric-Port ist reines TC
 
 - Eigener Hostname auf `<SERVER-IP>`.
 - Origin Rule: Zielport auf `dashboard.port` setzen (Standard 2064). Das Plugin lauscht nur auf diesem Port, nicht auf 80 oder 443.
-- Am Origin gibt es kein TLS (`com.sun.net.httpserver`, kein Zertifikat im Code). Ein SSL-Modus, der vom Origin HTTPS erwartet, schlägt fehl. Die Konsole des Dashboards hängt an einer dauerhaften SSE-Verbindung (`/api/console/stream`); ein Proxy muss die offen halten.
-- Dieselbe Warnung wie ohne Domain: HTTP, Passwort und Cookie sind unterwegs lesbar, wer angemeldet ist, bedient den Server.
+- TLS am Origin ist optional (`dashboard.https.enabled`). Ohne diesen Schalter erwartet der Origin HTTP. Ein SSL-Modus, der dann HTTPS vom Origin verlangt, schlägt fehl. Mit eingeschaltetem TLS kann der Proxy auf HTTPS zum Origin gehen; das Zertifikat ist selbstsigniert, solange kein eigenes Keystore oder PEM liegt. Die Konsole hängt an einer dauerhaften SSE-Verbindung (`/api/console/stream`); ein Proxy muss die offen halten.
+- Wer angemeldet ist, bedient den Server. Ohne TLS sind Passwort und Cookie unterwegs lesbar.
 
 ## 15. Störungen
 

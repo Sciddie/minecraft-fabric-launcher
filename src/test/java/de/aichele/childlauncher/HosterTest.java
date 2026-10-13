@@ -163,6 +163,33 @@ class HosterTest {
         assertEquals("server.jar", LaunchPlan.jarName("other", "26.3", null));
     }
 
+    @Test void jarProbeStatsRegularFileAndSkipsSymlink() throws Exception {
+        Path dir = Files.createDirectories(tmp.resolve("jars"));
+        Path jar = dir.resolve("fabric-server-launch-26.3.jar");
+        Files.writeString(jar, "not-a-real-server");
+        ServerProfile present = profile("fabric", "26.3", "server.jar", List.of(), List.of(), dir.toString());
+        JarProbe.Info info = JarProbe.inspect(present);
+        assertEquals("fabric-server-launch-26.3.jar", info.name());
+        assertTrue(info.exists());
+        assertTrue(info.regular());
+        assertFalse(info.symlink());
+        assertEquals(Files.size(jar), info.bytes());
+        assertTrue(info.mtime() > 0);
+        assertFalse(JarProbe.text(info).contains("not-a-real-server"));
+        ServerProfile missing = profile("paper", "26.3", null, List.of(), List.of(), dir.toString());
+        JarProbe.Info absent = JarProbe.inspect(missing);
+        assertFalse(absent.exists());
+        assertEquals("paper-26.3.jar", absent.name());
+        assertTrue(JarProbe.text(absent).startsWith("paper-26.3.jar fehlt"));
+        Path outside = Files.createDirectories(tmp.resolve("outside-jar"));
+        Files.writeString(outside.resolve("secret.txt"), "secret-bytes");
+        Files.createSymbolicLink(dir.resolve("spigot-26.3.jar"), outside.resolve("secret.txt"));
+        JarProbe.Info link = JarProbe.inspect(profile("spigot", "26.3", null, List.of(), List.of(), dir.toString()));
+        assertTrue(link.symlink());
+        assertEquals(-1, link.bytes());
+        assertFalse(JarProbe.text(link).contains("secret"));
+    }
+
     @Test void crashIndexReadsAndRejectsEscape() throws Exception {
         Path root = Files.createDirectories(tmp.resolve("child"));
         Path crashes = Files.createDirectories(root.resolve("crash-reports"));

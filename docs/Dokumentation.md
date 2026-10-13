@@ -1,6 +1,6 @@
 # FabricLauncher – Dokumentation
 
-*Stand: 12.10.2026 · Plugin-Version 1.0.0 · Spigot 26.3 / Java 25 · Zap-Hosting-Server `g266459`*
+*Stand: 13.10.2026 · Plugin-Version 1.1.0 · Spigot 26.3 / Java 25 · Zap-Hosting-Server `g266459`*
 
 **Neu aufsetzen:** Schritt für Schritt auf einem neuen Spigot-Server steht in [SETUP.md](SETUP.md).
 
@@ -36,7 +36,7 @@ Zap-Container (4 Kerne)
 
 Die ausführliche Ersteinrichtung (Voraussetzungen, FTP, erster Start, `config.yml`, Weltumzug, Dashboard) steht in [SETUP.md](SETUP.md). Kurzfassung:
 
-1. `FabricLauncher-1.0.0.jar` nach `plugins/` hochladen (FTP).
+1. `FabricLauncher-1.1.0.jar` nach `plugins/` hochladen (FTP).
 2. Spigot starten. Beim ersten Start:
    - `plugins/FabricLauncher/config.yml` wird erzeugt,
    - Dashboard-Passwort wird erzeugt (`plugins/FabricLauncher/dashboard-password.txt`, einmalig im Log),
@@ -89,6 +89,11 @@ Standardwerte unter `serverProperties`: `white-list: false`, `enforce-whitelist:
 | `/child cmd <befehl>` | Befehl an die Child-Konsole, z. B. `/child cmd whitelist add Name` |
 | `/child config set <pfad> <wert>` | Wert in config.yml setzen (`true/false/Zahl/Text`, Listen: `[list]a,b`) |
 | `/child prop set <key> <wert>` | Wert in der Child-server.properties setzen |
+| `/child mods` | Jars unter `mods/` und `plugins/` |
+| `/child mod install <slug> [version]` | Modrinth-Download, erst auf diesen Befehl |
+| `/child mod toggle <pfad>` | `.jar` ↔ `.jar.disabled` |
+| `/child diag` | Prozess- und Plattenwerte |
+| `/child threaddump` / `heap` / `flags` | lesende `jcmd`-Ausgabe |
 
 Per RCON (Port 2062) funktionieren dieselben Befehle ohne Schrägstrich.
 
@@ -97,9 +102,12 @@ Per RCON (Port 2062) funktionieren dieselben Befehle ohne Schrägstrich.
 - **Login** mit Passwort aus `plugins/FabricLauncher/dashboard-password.txt` (Datei ändern + Spigot-Neustart = neues Passwort). Sitzungen 12 h; nach 5 Fehlversuchen Sperre pro IP (30 s, steigend bis 1 h).
 - **Status:** Start/Neustart/Stopp, Uptime, PID, Spieler.
 - **Ressourcen Spigot vs. Fabric** (Aktualisierung alle 3 s): RSS, Heap, CPU (% eines Kerns), Threads, TPS/MSPT, geladene Chunks/Entities der Lobby. Child-TPS/MSPT kommen aus `tick query` (höchstens alle 10 s, nur solange das Dashboard offen ist; die Antwortzeilen werden aus Konsole/Log herausgefiltert). Spigot-„MSPT“ ist das gemessene Tick-Intervall (~50 ms = gesund). Child-Heap ist von außen nicht messbar (angezeigt: Xmx).
-- **Konsole** live (SSE) mit Befehlseingabe, **Spieler** (Whitelist/OP/Kick/Ban), Editor für **server.properties** und **config.yml**, **Dateimanager** (nur innerhalb `child-server/`, Upload bis 1 GB, Löschen nur einzelner Dateien/leerer Ordner mit Bestätigung), **Logs** (auch `.gz`).
+- **Konsole** live (SSE) mit Befehlseingabe, **Spieler** (Whitelist/OP/Kick/Ban), Rohtext für **server.properties** und **config.yml**, **Dateimanager** (nur innerhalb `child-server/`, Upload bis 1 GB, Löschen nur einzelner Dateien/leerer Ordner mit Bestätigung), **Logs** (Level, Filter, auch `.gz`, Fenster vom Dateiende), **Mods** (Liste, Toggle, Modrinth on demand), **Diagnose** (RSS, FDs, Platte, MSPT-Verlauf, `jcmd`).
+- **TLS:** `dashboard.https.enabled` mit `mode` `self-signed`, `keystore` oder `pem`. Aus bleibt HTTP. Paper- und Vanilla-Jars werden beim Download per SHA-256 bzw. SHA-1 geprüft, Modrinth-Dateien per SHA-1.
 
-> **Sicherheitshinweis:** Das Dashboard läuft über **unverschlüsseltes HTTP**. Passwort und Sitzungscookie können in fremden Netzen mitgelesen werden. Nur aus vertrauenswürdigen Netzen nutzen, starkes Passwort verwenden, bei Verdacht Passwort-Datei ändern und Spigot neu starten. Das Dashboard hat Vollzugriff auf den Child-Server (Konsole, Dateien).
+Aufsicht, Dateibaum, Konsole und Archiv-Idee folgen Pterodactyl Wings und Crafty Controller. Der MSPT-Verlauf folgt der Darstellung von spark, die Werte kommen nur aus dem Vanilla-Befehl `tick query`. Mods kommen von der Modrinth-API und werden wie in Prism/Modrinth mit `.jar.disabled` abgeschaltet. Nichts davon lädt ein Mod in den Child, solange es nicht ausdrücklich installiert wird, und nichts davon ändert Spielregeln.
+
+> **Sicherheitshinweis:** Ohne `dashboard.https.enabled` läuft das Dashboard über **unverschlüsseltes HTTP**. Passwort und Sitzungscookie können in fremden Netzen mitgelesen werden. Nur aus vertrauenswürdigen Netzen nutzen, starkes Passwort verwenden, bei Verdacht Passwort-Datei ändern und Spigot neu starten. Mit TLS setzt das Cookie `Secure`. Das Dashboard hat Vollzugriff auf den Child-Server (Konsole, Dateien).
 
 ## 7. OuterTuner (äußerer Spigot)
 

@@ -18,8 +18,8 @@ import java.util.concurrent.*;
 import java.util.logging.Level;
 
 public final class FabricLauncherPlugin extends JavaPlugin {
-    private static final String UA = "aichele/FabricLauncher/1.0 (spigot child launcher)";
     private final HttpClient http = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NORMAL).connectTimeout(Duration.ofSeconds(20)).build();
+    private Upstream upstream;
     private final ExecutorService exec = Executors.newCachedThreadPool(r -> { Thread t = new Thread(r, "FabricLauncher"); t.setDaemon(true); return t; });
     private final Object lock = new Object();
     private volatile Process process;
@@ -29,9 +29,13 @@ public final class FabricLauncherPlugin extends JavaPlugin {
     private volatile long startedAt;
     private volatile int attempts = 0;
     private volatile String lastStatus = "idle";
-    final ConsoleBuffer console = new ConsoleBuffer(1000);
+    ConsoleBuffer console = new ConsoleBuffer(4000);
     final Set<String> onlinePlayers = ConcurrentHashMap.newKeySet();
     private Dashboard dashboard;
+    private volatile ProcessProbe.Disk diskCache;
+    private volatile long diskCacheAt;
+    private final double[] msptRing = new double[60];
+    private int msptRingN;
     private Thread shutdownHook;
     private final ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor(r -> { Thread t = new Thread(r, "FabricLauncher-Save"); t.setDaemon(true); return t; });
     private final Object stopLock = new Object();
@@ -44,12 +48,13 @@ public final class FabricLauncherPlugin extends JavaPlugin {
     private long lastSampleNs; private final long[] tickNs = new long[20]; private int tickIdx; private long tickStart;
     // ---- child tick stats (from 'tick query') ----
     volatile double childMspt = -1, childTps = -1; volatile long childTickAt; private volatile long tickQueryAt;
-    private static final java.util.regex.Pattern AVG_TICK = java.util.regex.Pattern.compile("Average time per tick: ([\\d.,]+) ?ms");
-    private static final java.util.regex.Pattern TARGET_RATE = java.util.regex.Pattern.compile("Target tick rate: ([\\d.,]+)");
-    private volatile double childTargetRate = 20;
+    private final TickQueryFilter ticks = new TickQueryFilter();
 
     @Override public void onEnable() {
         saveDefaultConfig();
+        int cap = getConfig().getInt("consoleBufferLines", 4000);
+        console = new ConsoleBuffer(Math.max(200, Math.min(cap, 20_000)));
+        upstream = new Upstream(http, "aichele/FabricLauncher/" + getDescription().getVersion() + " (spigot child launcher)", m -> getLogger().info(m));
         if (getConfig().getBoolean("neuterOuter", true)) {
             OuterTuner.patchFiles(this);
             getServer().getScheduler().runTask(this, () -> OuterTuner.applyRuntime(this));
@@ -110,6 +115,47 @@ public final class FabricLauncherPlugin extends JavaPlugin {
         String d = getConfig().getString("workingDir", "./child-server");
         return Paths.get(d).toAbsolutePath().normalize();
     }
+
+    Upstream upstream() { return upstream; }
+    boolean dashboardTls() { return dashboard != null && dashboard.tls(); }
+
+    List<Double> msptHistory() {
+        int n = Math.min(msptRingN, msptRing.length);
+        int start = msptRingN - n;
+        List<Double> out = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) out.add(msptRing[(start + i) % msptRing.length]);
+        return out;
+    }
+
+    private void pushMspt(double v) { msptRing[msptRingN++ % msptRing.length] = v; }
+
+    ProcessProbe.Disk diskCached() {
+        long now = System.currentTimeMillis();
+        ProcessProbe.Disk cached = diskCache;
+        if (cached != null && now - diskCacheAt < 60_000) return cached;
+        ProcessProbe.Disk fresh = ProcessProbe.disk(workDir(), 100_000);
+        diskCache = fresh; diskCacheAt = now;
+        return fresh;
+    }
+
+    Map<String, Object> diagMap() {
+        Map<String, Object> m = new LinkedHashMap<>();
+        long pid = pid();
+        m.put("running", running());
+        m.put("pid", pid);
+        m.put("tls", dashboardTls());
+        m.put("status", lastStatus);
+        m.put("mspt", childMspt);
+        m.put("tps", childTps);
+        if (pid > 0) m.putAll(ProcessProbe.snapshot(pid));
+        ProcessProbe.Disk d = diskCached();
+        m.put("diskBytes", d.bytes());
+        m.put("diskFiles", d.files());
+        m.put("diskPartial", d.partial());
+        return m;
+    }
+
+    String jcmd(String command) throws IOException { return ProcessProbe.jcmd(pid(), command); }
 
     // ---------------- lifecycle ----------------
     private void startAsync(CommandSender s) {
@@ -194,18 +240,15 @@ public final class FabricLauncherPlugin extends JavaPlugin {
 
     /** Returns true if the line belongs to a tick-query answer (hidden from console/log). */
     private boolean parseTick(String line) {
-        if (System.currentTimeMillis() - tickQueryAt > 3000) return false;
-        var m = TARGET_RATE.matcher(line);
-        if (m.find()) { try { childTargetRate = Double.parseDouble(m.group(1).replace(',', '.')); } catch (Exception ignored) {} return true; }
-        m = AVG_TICK.matcher(line);
-        if (m.find()) {
-            try {
-                double ms = Double.parseDouble(m.group(1).replace(',', '.'));
-                childMspt = ms; childTps = Math.round(Math.min(childTargetRate, 1000 / Math.max(ms, 0.001)) * 100) / 100.0; childTickAt = System.currentTimeMillis();
-            } catch (Exception ignored) {}
-            return true;
+        long before = ticks.tickAt;
+        boolean hide = ticks.consume(line, tickQueryAt, System.currentTimeMillis());
+        if (hide && ticks.tickAt != before) {
+            childMspt = ticks.mspt;
+            childTps = ticks.tps;
+            childTickAt = ticks.tickAt;
+            pushMspt(childMspt);
         }
-        return line.contains("The game is running normally") || line.contains("Percentiles") || line.matches(".*\\]: ?P\\d+: .*") || line.contains("Sprinting") || line.contains("game is frozen") || line.contains("tick rate");
+        return hide;
     }
 
     private void trackPlayers(String line) {
@@ -238,7 +281,7 @@ public final class FabricLauncherPlugin extends JavaPlugin {
         if (max > 0 && attempts >= max) { getLogger().severe("Max restart attempts reached; giving up. Use /child start."); wantRunning = false; lastStatus += ", gave up"; return; }
         long base = getConfig().getLong("autoRestart.initialDelaySeconds", 5);
         long cap = getConfig().getLong("autoRestart.maxDelaySeconds", 300);
-        long delay = Math.min(cap, base * (1L << Math.min(attempts, 20)));
+        long delay = RestartBackoff.delaySeconds(base, cap, attempts);
         attempts++;
         lastStatus += ", restarting in " + delay + "s (attempt " + attempts + ")";
         getLogger().warning("Restarting child in " + delay + "s (attempt " + attempts + ")");
@@ -322,14 +365,67 @@ public final class FabricLauncherPlugin extends JavaPlugin {
                     s.sendMessage("child server.properties: " + a[2] + "=" + val + "  (applies on /child restart)");
                 } catch (IOException e) { s.sendMessage("Failed: " + e.getMessage()); }
             }
+            case "mods" -> {
+                try {
+                    var list = ModAdmin.list(workDir());
+                    if (list.isEmpty()) s.sendMessage("No mods/ or plugins/ entries.");
+                    for (var e : list) s.sendMessage((e.enabled() ? "on  " : "off ") + e.path() + (e.directory() ? "/" : "  " + e.size()));
+                } catch (IOException e) { s.sendMessage("Failed: " + e.getMessage()); }
+            }
+            case "mod" -> {
+                if (a.length < 3) { s.sendMessage("/child mod <install|toggle|search> ..."); return true; }
+                try { modCommand(s, a); }
+                catch (Exception e) { s.sendMessage("Failed: " + e.getMessage()); }
+            }
+            case "diag" -> {
+                Map<String, Object> d = diagMap();
+                s.sendMessage("running=" + d.get("running") + " pid=" + d.get("pid") + " tls=" + d.get("tls") + " status=" + d.get("status"));
+                s.sendMessage("rssMb=" + d.get("rssMb") + " threads=" + d.get("threads") + " fds=" + d.get("fds") + " mspt=" + d.get("mspt") + " tps=" + d.get("tps"));
+                s.sendMessage("diskBytes=" + d.get("diskBytes") + " diskFiles=" + d.get("diskFiles") + " partial=" + d.get("diskPartial"));
+            }
+            case "threaddump", "heap", "flags" -> {
+                String cmd = switch (a[0].toLowerCase(Locale.ROOT)) { case "heap" -> "GC.heap_info"; case "flags" -> "VM.flags"; default -> "Thread.print"; };
+                try {
+                    String text = jcmd(cmd);
+                    String[] lines = text.split("\n");
+                    int n = Math.min(lines.length, 40);
+                    for (int i = 0; i < n; i++) s.sendMessage(lines[i]);
+                    if (lines.length > n) s.sendMessage("... " + (lines.length - n) + " more lines in the dashboard");
+                } catch (IOException e) { s.sendMessage("Failed: " + e.getMessage()); }
+            }
             default -> { return false; }
         }
         return true;
     }
 
+    private void modCommand(CommandSender s, String[] a) throws Exception {
+        switch (a[1].toLowerCase(Locale.ROOT)) {
+            case "search" -> {
+                if (a.length < 3) { s.sendMessage("/child mod search <text>"); return; }
+                String q = String.join(" ", Arrays.copyOfRange(a, 2, a.length));
+                for (var hit : ModAdmin.search(upstream, getConfig().getString("type"), q))
+                    s.sendMessage(hit.get("slug") + "  " + hit.get("title") + "  " + hit.get("downloads"));
+            }
+            case "install" -> {
+                if (a.length < 3) { s.sendMessage("/child mod install <slug> [version]"); return; }
+                String ver = a.length > 3 ? a[3] : "";
+                var r = ModAdmin.install(upstream, workDir(), getConfig().getString("type"), getConfig().getString("mcVersion"), a[2], ver);
+                s.sendMessage("Installed " + r.get("path") + " " + r.get("version") + " (active after child restart)");
+            }
+            case "toggle" -> {
+                if (a.length < 3) { s.sendMessage("/child mod toggle <mods/file.jar>"); return; }
+                PathGuard g = PathGuard.open(workDir());
+                String name = Path.of(a[2]).getFileName().toString();
+                s.sendMessage("Toggled -> " + ModAdmin.toggle(g, a[2], name) + " (active after child restart)");
+            }
+            default -> s.sendMessage("/child mod <install|toggle|search> ...");
+        }
+    }
+
     @Override public List<String> onTabComplete(CommandSender s, Command c, String l, String[] a) {
         if (a.length == 2 && (a[0].equalsIgnoreCase("config") || a[0].equalsIgnoreCase("prop"))) return List.of("set");
-        if (a.length == 1) return List.of("start", "stop", "restart", "status", "cmd", "config", "prop").stream().filter(x -> x.startsWith(a[0].toLowerCase(Locale.ROOT))).toList();
+        if (a.length == 2 && a[0].equalsIgnoreCase("mod")) return List.of("install", "toggle", "search").stream().filter(x -> x.startsWith(a[1].toLowerCase(Locale.ROOT))).toList();
+        if (a.length == 1) return List.of("start", "stop", "restart", "status", "cmd", "config", "prop", "mods", "mod", "diag", "threaddump", "heap", "flags").stream().filter(x -> x.startsWith(a[0].toLowerCase(Locale.ROOT))).toList();
         return List.of();
     }
 
@@ -348,9 +444,9 @@ public final class FabricLauncherPlugin extends JavaPlugin {
                 if (!Files.exists(jar)) {
                     String loader = c.getString("fabricLoaderVersion", "latest");
                     String inst = c.getString("fabricInstallerVersion", "latest");
-                    if ("latest".equalsIgnoreCase(loader)) loader = firstStable(getJson("https://meta.fabricmc.net/v2/versions/loader/" + mc).getAsJsonArray(), true);
-                    if ("latest".equalsIgnoreCase(inst)) inst = firstStable(getJson("https://meta.fabricmc.net/v2/versions/installer").getAsJsonArray(), false);
-                    download("https://meta.fabricmc.net/v2/versions/loader/" + mc + "/" + loader + "/" + inst + "/server/jar", jar);
+                    if ("latest".equalsIgnoreCase(loader)) loader = firstStable(upstream.getJson("https://meta.fabricmc.net/v2/versions/loader/" + mc).getAsJsonArray(), true);
+                    if ("latest".equalsIgnoreCase(inst)) inst = firstStable(upstream.getJson("https://meta.fabricmc.net/v2/versions/installer").getAsJsonArray(), false);
+                    upstream.download("https://meta.fabricmc.net/v2/versions/loader/" + mc + "/" + loader + "/" + inst + "/server/jar", jar);
                 }
                 downloadMods(c, wd.resolve("mods"), mc);
                 return jar;
@@ -358,24 +454,27 @@ public final class FabricLauncherPlugin extends JavaPlugin {
             case "paper": {
                 Path jar = wd.resolve("paper-" + mc + ".jar");
                 if (!Files.exists(jar)) {
-                    JsonArray builds = getJson("https://fill.papermc.io/v3/projects/paper/versions/" + mc + "/builds").getAsJsonArray();
+                    JsonArray builds = upstream.getJson("https://fill.papermc.io/v3/projects/paper/versions/" + mc + "/builds").getAsJsonArray();
                     if (builds.isEmpty()) throw new IOException("No Paper builds for " + mc);
                     JsonObject pick = null;
                     for (JsonElement e : builds) { JsonObject b = e.getAsJsonObject(); if ("STABLE".equalsIgnoreCase(str(b, "channel"))) { pick = b; break; } }
                     if (pick == null) { pick = builds.get(0).getAsJsonObject(); getLogger().warning("No STABLE Paper build for " + mc + ", using build " + pick.get("id")); }
-                    download(pick.getAsJsonObject("downloads").getAsJsonObject("server:default").get("url").getAsString(), jar);
+                    JsonObject dl = pick.getAsJsonObject("downloads").getAsJsonObject("server:default");
+                    String sha = dl.has("checksums") && dl.getAsJsonObject("checksums").has("sha256") ? dl.getAsJsonObject("checksums").get("sha256").getAsString() : null;
+                    upstream.download(dl.get("url").getAsString(), jar, "SHA-256", sha);
                 }
                 return jar;
             }
             case "vanilla": {
                 Path jar = wd.resolve("minecraft_server-" + mc + ".jar");
                 if (!Files.exists(jar)) {
-                    JsonObject man = getJson("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json").getAsJsonObject();
+                    JsonObject man = upstream.getJson("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json").getAsJsonObject();
                     String url = null;
                     for (JsonElement e : man.getAsJsonArray("versions")) if (mc.equals(str(e.getAsJsonObject(), "id"))) url = str(e.getAsJsonObject(), "url");
                     if (url == null) throw new IOException("Version " + mc + " not in Mojang manifest");
-                    JsonObject v = getJson(url).getAsJsonObject();
-                    download(v.getAsJsonObject("downloads").getAsJsonObject("server").get("url").getAsString(), jar);
+                    JsonObject v = upstream.getJson(url).getAsJsonObject();
+                    JsonObject server = v.getAsJsonObject("downloads").getAsJsonObject("server");
+                    upstream.download(server.get("url").getAsString(), jar, "SHA-1", server.has("sha1") ? server.get("sha1").getAsString() : null);
                 }
                 return jar;
             }
@@ -399,7 +498,7 @@ public final class FabricLauncherPlugin extends JavaPlugin {
                 if (st.anyMatch(f -> f.getFileName().toString().startsWith(".fl-" + slug + "-"))) continue; // marker exists
             }
             String q = "?loaders=" + enc("[\"fabric\"]") + "&game_versions=" + enc("[\"" + mc + "\"]");
-            JsonArray vers = getJson("https://api.modrinth.com/v2/project/" + slug + "/version" + q).getAsJsonArray();
+            JsonArray vers = upstream.getJson("https://api.modrinth.com/v2/project/" + slug + "/version" + q).getAsJsonArray();
             if (vers.isEmpty()) { getLogger().warning("Modrinth: no " + slug + " build for fabric " + mc + " - skipped"); continue; }
             JsonObject v = vers.get(0).getAsJsonObject();
             for (JsonElement e : vers) { if ("release".equals(str(e.getAsJsonObject(), "version_type"))) { v = e.getAsJsonObject(); break; } }
@@ -407,7 +506,13 @@ public final class FabricLauncherPlugin extends JavaPlugin {
             for (JsonElement f : v.getAsJsonArray("files")) { if (f.getAsJsonObject().get("primary").getAsBoolean()) file = f.getAsJsonObject(); }
             if (file == null) file = v.getAsJsonArray("files").get(0).getAsJsonObject();
             String name = str(file, "filename");
-            download(str(file, "url"), modsDir.resolve(name));
+            if (name == null || name.contains("/") || name.contains("\\") || name.contains("..") || !name.endsWith(".jar")) {
+                getLogger().warning("Modrinth: unexpected filename for " + slug + " - skipped"); continue;
+            }
+            String sha1 = file.has("hashes") && file.get("hashes").isJsonObject() && file.getAsJsonObject("hashes").has("sha1") ? file.getAsJsonObject("hashes").get("sha1").getAsString() : null;
+            try { ModAdmin.requireModrinthCdn(str(file, "url")); }
+            catch (IllegalArgumentException bad) { getLogger().warning("Modrinth: rejected URL for " + slug); continue; }
+            upstream.download(str(file, "url"), modsDir.resolve(name), "SHA-1", sha1);
             Files.writeString(modsDir.resolve(".fl-" + slug + "-" + name + ".marker"), str(v, "version_number"));
             getLogger().info("Installed mod " + slug + " -> " + name);
         }
@@ -452,19 +557,7 @@ public final class FabricLauncherPlugin extends JavaPlugin {
 
     /** Line-based edit: keeps comments, order and all other keys. force = always set, defaults = only if absent. */
     static void updateProperties(Path f, Map<String, String> force, Map<String, String> defaults) throws IOException {
-        List<String> lines = Files.exists(f) ? new ArrayList<>(Files.readAllLines(f, StandardCharsets.UTF_8)) : new ArrayList<>();
-        Set<String> seen = new HashSet<>();
-        for (int i = 0; i < lines.size(); i++) {
-            String l = lines.get(i), t = l.trim();
-            if (t.isEmpty() || t.startsWith("#") || t.startsWith("!")) continue;
-            int eq = t.indexOf('=');
-            String k = (eq < 0 ? t : t.substring(0, eq)).trim();
-            seen.add(k);
-            if (force.containsKey(k)) lines.set(i, k + "=" + force.get(k));
-        }
-        for (var e : force.entrySet()) if (!seen.contains(e.getKey())) { lines.add(e.getKey() + "=" + e.getValue()); seen.add(e.getKey()); }
-        for (var e : defaults.entrySet()) if (!seen.contains(e.getKey())) lines.add(e.getKey() + "=" + e.getValue());
-        Files.write(f, lines, StandardCharsets.UTF_8);
+        PropertiesFile.update(f, force, defaults);
     }
 
     private void writeProperties(FileConfiguration c, Path wd) throws IOException {
@@ -480,20 +573,6 @@ public final class FabricLauncherPlugin extends JavaPlugin {
         defaults.put("enable-rcon", "false");
         defaults.put("enable-query", "false");
         updateProperties(wd.resolve("server.properties"), force, defaults);
-    }
-
-    private JsonElement getJson(String url) throws Exception {
-        HttpResponse<String> r = http.send(HttpRequest.newBuilder(URI.create(url)).header("User-Agent", UA).timeout(Duration.ofSeconds(60)).GET().build(), HttpResponse.BodyHandlers.ofString());
-        if (r.statusCode() / 100 != 2) throw new IOException("HTTP " + r.statusCode() + " for " + url);
-        return JsonParser.parseString(r.body());
-    }
-
-    private void download(String url, Path target) throws Exception {
-        getLogger().info("Downloading " + url);
-        Path tmp = target.resolveSibling(target.getFileName() + ".part");
-        HttpResponse<Path> r = http.send(HttpRequest.newBuilder(URI.create(url)).header("User-Agent", UA).timeout(Duration.ofMinutes(10)).GET().build(), HttpResponse.BodyHandlers.ofFile(tmp));
-        if (r.statusCode() / 100 != 2) { Files.deleteIfExists(tmp); throw new IOException("HTTP " + r.statusCode() + " for " + url); }
-        Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
     }
 
     private static String str(JsonObject o, String k) { JsonElement e = o.get(k); return e == null || e.isJsonNull() ? null : e.getAsString(); }

@@ -74,12 +74,27 @@ serverProperties:
   enable-rcon: false
   sync-chunk-writes: false
   network-compression-threshold: 512
-# Web dashboard (JDK built-in HTTP server). Password: plugins/FabricLauncher/dashboard-password.txt
+# Lines kept for the dashboard console (SSE ring)
+consoleBufferLines: 4000
+# Web dashboard (JDK HTTP server, optional TLS). Password: plugins/FabricLauncher/dashboard-password.txt
 dashboard:
   enabled: true
   port: 2064
   # "" = use serverIp above; "0.0.0.0" = all interfaces
   bind: ""
+  # TLS is off until enabled. Material is created only when the dashboard starts with https.enabled.
+  # mode: self-signed | keystore | pem
+  https:
+    enabled: false
+    mode: self-signed
+    keystore: dashboard.p12
+    keystorePassword: ""
+    keyPassword: ""
+    cert: dashboard.crt
+    key: dashboard.key
+    days: 825
+    dn: "CN=FabricLauncher"
+    sans: []
 # Neuter the outer Spigot (lobby) server: patches its server.properties / bukkit.yml / spigot.yml on enable
 # (effective from the next Spigot start) and applies runtime tweaks to the outer worlds. Never touches the child.
 neuterOuter: true

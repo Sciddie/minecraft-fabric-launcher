@@ -14,7 +14,7 @@ Voraussetzung: **Java 25** (Minecraft 26.x) und Maven.
 mvn package
 ```
 
-Das Plugin-Jar liegt danach unter `target/FabricLauncher-1.0.0.jar`.
+Das Plugin-Jar liegt danach unter `target/FabricLauncher-1.1.0.jar`.
 
 ## Dokumentation
 

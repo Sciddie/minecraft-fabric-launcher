@@ -1,0 +1,14 @@
+{
+  "name": "FabricLauncher plugin test",
+  "user": "ubuntu",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "install": "bash .cursor/install.sh",
+  "start": "bash .cursor/start.sh",
+  "ports": [
+    { "name": "outer-spigot", "port": 2060 },
+    { "name": "child", "port": 2063 },
+    { "name": "dashboard", "port": 2064 }
+  ]
+}

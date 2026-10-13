@@ -183,6 +183,12 @@ public final class FabricLauncherPlugin extends JavaPlugin {
         return profiles.isEmpty() || profiles.get(0).id.equals(pr.id) ? "" : "servers." + pr.id + ".";
     }
 
+    String planText(String id) { return LaunchPlan.text(javaBin(), profile(id)); }
+    Map<String, Object> jarView(String id) throws IOException { return JarProbe.view(JarProbe.inspect(profile(id))); }
+    String jarText(String id) throws IOException { return JarProbe.text(JarProbe.inspect(profile(id))); }
+    List<String> crashFiles(String id) throws IOException { return CrashIndex.list(profile(id).directory()); }
+    String crashText(String id, String file) throws IOException { return CrashIndex.read(profile(id).directory(), file); }
+
     Path workDir() { return profile(focus).directory(); }
     Path workDir(String id) { return profile(id).directory(); }
     List<Path> workDirs() { List<Path> out = new ArrayList<>(); for (ServerProfile p : profiles) out.add(p.directory()); return out; }
@@ -383,15 +389,8 @@ public final class FabricLauncherPlugin extends JavaPlugin {
             Path jar = prepareFiles(profile, wd);
             Files.writeString(wd.resolve("eula.txt"), "eula=true\n");
             writeProperties(profile, wd);
-            String javaBin = Paths.get(System.getProperty("java.home"), "bin", isWindows() ? "java.exe" : "java").toString();
-            List<String> cmd = new ArrayList<>();
-            cmd.add(javaBin);
-            cmd.add("-XX:+IgnoreUnrecognizedVMOptions");
-            cmd.add("-Xms" + profile.xms);
-            cmd.add("-Xmx" + profile.xmx);
-            for (String fl : profile.jvmFlags) { if (!fl.contains("G1RSetUpdatingPauseIntervalMillis")) cmd.add(fl); }
-            cmd.add("-jar"); cmd.add(jar.toString()); cmd.add("nogui");
-            cmd.addAll(profile.serverArgs);
+            String javaBin = javaBin();
+            List<String> cmd = new ArrayList<>(LaunchPlan.argv(javaBin, profile, jar));
             getLogger().info("Launching " + profile.id + ": " + String.join(" ", cmd));
             Process p = new ProcessBuilder(cmd).directory(wd.toFile()).redirectErrorStream(true).start();
             slot.process = p; slot.startedAt = System.currentTimeMillis(); slot.onlinePlayers.clear();
@@ -575,6 +574,27 @@ public final class FabricLauncherPlugin extends JavaPlugin {
                 if (a.length < 2) { s.sendMessage("/child versions <fabric|paper|vanilla|spigot>"); return true; }
                 exec.submit(() -> { try { for (String v : versions(a[1])) msg(s, v); } catch (Exception e) { msg(s, "Versions failed: " + e.getMessage()); } });
             }
+            case "plan" -> s.sendMessage(planText(focus));
+            case "jar" -> {
+                try { s.sendMessage(jarText(focus)); }
+                catch (IOException e) { s.sendMessage("Failed: " + e.getMessage()); }
+            }
+            case "crashes" -> {
+                try {
+                    if (a.length < 2) {
+                        List<String> files = crashFiles(focus);
+                        if (files.isEmpty()) s.sendMessage("no crash-reports");
+                        for (String f : files) s.sendMessage(f);
+                    } else {
+                        String text = crashText(focus, a[1]);
+                        String[] lines = text.split("\n", -1);
+                        int n = Math.min(lines.length, 40);
+                        for (int i = 0; i < n; i++) s.sendMessage(lines[i]);
+                        if (lines.length > n) s.sendMessage("... " + (lines.length - n) + " more lines in the dashboard");
+                    }
+                } catch (IOException e) { s.sendMessage("Failed: " + e.getMessage()); }
+                catch (SecurityException e) { s.sendMessage("Failed: " + e.getMessage()); }
+            }
             case "cmd" -> {
                 if (a.length < 2) { s.sendMessage("/child cmd <command>"); return true; }
                 String c = String.join(" ", Arrays.copyOfRange(a, 1, a.length));
@@ -657,7 +677,11 @@ public final class FabricLauncherPlugin extends JavaPlugin {
     @Override public List<String> onTabComplete(CommandSender s, Command c, String l, String[] a) {
         if (a.length == 2 && (a[0].equalsIgnoreCase("config") || a[0].equalsIgnoreCase("prop"))) return List.of("set");
         if (a.length == 2 && a[0].equalsIgnoreCase("mod")) return List.of("install", "toggle", "search").stream().filter(x -> x.startsWith(a[1].toLowerCase(Locale.ROOT))).toList();
-        if (a.length == 1) return List.of("start", "stop", "restart", "status", "cmd", "config", "prop", "mods", "mod", "diag", "threaddump", "heap", "flags", "servers", "focus", "tasks", "task", "backup", "versions").stream().filter(x -> x.startsWith(a[0].toLowerCase(Locale.ROOT))).toList();
+        if (a.length == 1) return List.of("start", "stop", "restart", "status", "cmd", "config", "prop", "mods", "mod", "diag", "threaddump", "heap", "flags", "servers", "focus", "tasks", "task", "backup", "versions", "plan", "crashes", "jar").stream().filter(x -> x.startsWith(a[0].toLowerCase(Locale.ROOT))).toList();
+        if (a.length == 2 && a[0].equalsIgnoreCase("crashes")) {
+            try { return crashFiles(focus).stream().filter(x -> x.startsWith(a[1])).toList(); }
+            catch (IOException e) { return List.of(); }
+        }
         if (a.length == 2 && a[0].equalsIgnoreCase("focus")) return profiles.stream().map(p -> p.id).filter(x -> x.startsWith(a[1])).toList();
         if (a.length == 2 && a[0].equalsIgnoreCase("versions")) return List.of("fabric", "paper", "vanilla", "spigot").stream().filter(x -> x.startsWith(a[1].toLowerCase(Locale.ROOT))).toList();
         return List.of();
@@ -812,6 +836,10 @@ public final class FabricLauncherPlugin extends JavaPlugin {
         defaults.put("enable-rcon", "false");
         defaults.put("enable-query", "false");
         updateProperties(wd.resolve("server.properties"), force, defaults);
+    }
+
+    static String javaBin() {
+        return Paths.get(System.getProperty("java.home"), "bin", isWindows() ? "java.exe" : "java").toString();
     }
 
     private static String str(JsonObject o, String k) { JsonElement e = o.get(k); return e == null || e.isJsonNull() ? null : e.getAsString(); }

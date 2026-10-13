@@ -20,6 +20,8 @@ Das Plugin-Jar liegt danach unter `target/FabricLauncher-1.0.0.jar`.
 
 Ausführliche Beschreibung: [docs/Dokumentation.md](docs/Dokumentation.md) (HTML-Fassung: [docs/Dokumentation.html](docs/Dokumentation.html)).
 
+Richtung der beiden Plugin-Linien: [docs/VISION.md](docs/VISION.md).
+
 ## WorldPorter
 
 Der Unterordner `worldporter/` enthält das frühere Plugin **WorldPorter**. Es hat Spigot-Welten einmalig ins Vanilla-Layout verschoben und ist **außer Dienst**. Nicht erneut installieren.

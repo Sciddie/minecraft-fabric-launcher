@@ -28,6 +28,12 @@ final class Upstream {
         this.log = log;
     }
 
+    String getText(String url) throws Exception {
+        HttpResponse<String> r = http.send(HttpRequest.newBuilder(URI.create(url)).header("User-Agent", userAgent).timeout(Duration.ofSeconds(60)).GET().build(), HttpResponse.BodyHandlers.ofString());
+        if (r.statusCode() / 100 != 2) throw new IOException("HTTP " + r.statusCode() + " for " + url);
+        return r.body();
+    }
+
     JsonElement getJson(String url) throws Exception {
         HttpResponse<String> r = http.send(HttpRequest.newBuilder(URI.create(url)).header("User-Agent", userAgent).timeout(Duration.ofSeconds(60)).GET().build(), HttpResponse.BodyHandlers.ofString());
         if (r.statusCode() / 100 != 2) throw new IOException("HTTP " + r.statusCode() + " for " + url);

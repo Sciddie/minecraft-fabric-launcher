@@ -21,21 +21,20 @@ public final class FabricLauncherPlugin extends JavaPlugin {
     private final HttpClient http = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NORMAL).connectTimeout(Duration.ofSeconds(20)).build();
     private Upstream upstream;
     private final ExecutorService exec = Executors.newCachedThreadPool(r -> { Thread t = new Thread(r, "FabricLauncher"); t.setDaemon(true); return t; });
-    private final Object lock = new Object();
-    private volatile Process process;
-    private volatile BufferedWriter stdin;
-    private volatile boolean wantRunning = false;
+    private final Map<String, ChildSlot> slots = new ConcurrentHashMap<>();
+    private int consoleCap = 4000;
+    private volatile List<ServerProfile> profiles = List.of();
+    private volatile String focus = "default";
+    private volatile boolean allowParallel;
+    private final Map<String, String> taskFired = new ConcurrentHashMap<>();
+    private final Map<String, String> taskLast = new ConcurrentHashMap<>();
+    volatile String lastBackup = "";
+    private final Map<String, ProcessProbe.Disk> diskCaches = new ConcurrentHashMap<>();
+    private final Map<String, Long> diskCacheAt = new ConcurrentHashMap<>();
+    private final Map<String, List<String>> versionCache = new ConcurrentHashMap<>();
+    private final Map<String, Long> versionCacheAt = new ConcurrentHashMap<>();
     private volatile boolean shuttingDown = false;
-    private volatile long startedAt;
-    private volatile int attempts = 0;
-    private volatile String lastStatus = "idle";
-    ConsoleBuffer console = new ConsoleBuffer(4000);
-    final Set<String> onlinePlayers = ConcurrentHashMap.newKeySet();
     private Dashboard dashboard;
-    private volatile ProcessProbe.Disk diskCache;
-    private volatile long diskCacheAt;
-    private final double[] msptRing = new double[60];
-    private int msptRingN;
     private Thread shutdownHook;
     private final ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor(r -> { Thread t = new Thread(r, "FabricLauncher-Save"); t.setDaemon(true); return t; });
     private final Object stopLock = new Object();
@@ -47,14 +46,11 @@ public final class FabricLauncherPlugin extends JavaPlugin {
     volatile double outerTps = 20, outerMspt = 0; volatile int outerChunks, outerEntities, outerWorlds;
     private long lastSampleNs; private final long[] tickNs = new long[20]; private int tickIdx; private long tickStart;
     // ---- child tick stats (from 'tick query') ----
-    volatile double childMspt = -1, childTps = -1; volatile long childTickAt; private volatile long tickQueryAt;
-    private final TickQueryFilter ticks = new TickQueryFilter();
-
     @Override public void onEnable() {
         saveDefaultConfig();
-        int cap = getConfig().getInt("consoleBufferLines", 4000);
-        console = new ConsoleBuffer(Math.max(200, Math.min(cap, 20_000)));
+        consoleCap = Math.max(200, Math.min(getConfig().getInt("consoleBufferLines", 4000), 20_000));
         upstream = new Upstream(http, "aichele/FabricLauncher/" + getDescription().getVersion() + " (spigot child launcher)", m -> getLogger().info(m));
+        reloadProfiles();
         if (getConfig().getBoolean("neuterOuter", true)) {
             OuterTuner.patchFiles(this);
             getServer().getScheduler().runTask(this, () -> OuterTuner.applyRuntime(this));
@@ -68,22 +64,24 @@ public final class FabricLauncherPlugin extends JavaPlugin {
         }
         // JVM shutdown hook: covers SIGTERM / Zap restart where onDisable might not run
         shutdownHook = new Thread(() -> {
-            shuttingDown = true; wantRunning = false;
-            Process p = process;
-            if (p != null && p.isAlive()) {
-                System.out.println("[FabricLauncher] JVM shutdown hook: stopping child server...");
-                stopProcess(p, getConfig().getLong("shutdownHookTimeoutSeconds", 25), true);
+            shuttingDown = true;
+            for (ChildSlot s : slots.values()) s.wantRunning = false;
+            for (ChildSlot s : List.copyOf(slots.values())) if (s.running()) {
+                System.out.println("[FabricLauncher] JVM shutdown hook: stopping " + s.id);
+                stopProcess(s, getConfig().getLong("shutdownHookTimeoutSeconds", 25), true);
             }
         }, "FabricLauncher-ShutdownHook");
         Runtime.getRuntime().addShutdownHook(shutdownHook);
         long every = getConfig().getLong("saveAllIntervalMinutes", 5);
-        if (every > 0) sched.scheduleAtFixedRate(() -> { if (isRunning()) send("save-all"); }, every, every, TimeUnit.MINUTES);
-        if (getConfig().getBoolean("autoStart", true)) startAsync(null);
+        if (every > 0) sched.scheduleAtFixedRate(() -> { for (ChildSlot s : slots.values()) if (s.running()) send(s, "save-all"); }, every, every, TimeUnit.MINUTES);
+        sched.scheduleAtFixedRate(this::fireDueTasks, 20, 20, TimeUnit.SECONDS);
+        for (ServerProfile p : profiles) if (p.autoStart && (allowParallel || p.id.equals(focus))) startAsync(null, p.id);
     }
 
     @Override public void onDisable() {
-        shuttingDown = true; wantRunning = false;
-        stopBlocking();
+        shuttingDown = true;
+        for (ChildSlot s : slots.values()) s.wantRunning = false;
+        for (ChildSlot s : List.copyOf(slots.values())) stopBlocking(s);
         sched.shutdownNow();
         try { if (shutdownHook != null) Runtime.getRuntime().removeShutdownHook(shutdownHook); } catch (IllegalStateException ignored) { /* JVM already shutting down; hook runs/ran */ }
         if (dashboard != null) dashboard.stop();
@@ -101,112 +99,319 @@ public final class FabricLauncherPlugin extends JavaPlugin {
     }
 
     // ---------------- public control API (used by commands + dashboard) ----------------
-    boolean running() { return isRunning(); }
-    long pid() { Process p = process; return p != null && p.isAlive() ? p.pid() : -1; }
-    long uptimeMillis() { return isRunning() ? System.currentTimeMillis() - startedAt : 0; }
-    String lastStatus() { return lastStatus; }
-    boolean sendCommand(String c) { if (c.startsWith("/")) c = c.substring(1); return send(c); }
-    void requestStart() { if (!isRunning()) { attempts = 0; startAsync(null); } }
-    void requestStop() { wantRunning = false; exec.submit(this::stopBlocking); }
-    void requestRestart() { exec.submit(() -> { wantRunning = false; stopBlocking(); attempts = 0; reloadConfig(); startAsync(null); }); }
-    void info(String m) { getLogger().info(m); console.add("[FabricLauncher] " + m); }
-
-    Path workDir() {
-        String d = getConfig().getString("workingDir", "./child-server");
-        return Paths.get(d).toAbsolutePath().normalize();
+    void reloadProfiles() {
+        Map<String, Object> flat = getConfig().getValues(true);
+        profiles = Profiles.load(flat);
+        focus = Profiles.focus(flat, profiles);
+        Object ap = flat.get("allowParallel");
+        allowParallel = ap instanceof Boolean b ? b : Boolean.parseBoolean(String.valueOf(ap));
+        for (ServerProfile p : profiles) slot(p.id).profile = p;
     }
+
+    String focusId() { return focus; }
+    List<ServerProfile> profiles() { return profiles; }
+    boolean allowParallel() { return allowParallel; }
+
+    ServerProfile profile(String id) {
+        String key = id == null || id.isBlank() ? focus : id;
+        for (ServerProfile p : profiles) if (p.id.equals(key)) return p;
+        throw new IllegalArgumentException("unknown server " + key);
+    }
+
+    ChildSlot slot(String id) {
+        String key = id == null || id.isBlank() ? focus : id;
+        profile(key);
+        return slots.computeIfAbsent(key, k -> new ChildSlot(k, consoleCap));
+    }
+
+    private ChildSlot focusSlot() { return slot(focus); }
+    boolean running() { return focusSlot().running(); }
+    boolean running(String id) { return slot(id).running(); }
+    long pid() { return focusSlot().pid(); }
+    long pid(String id) { return slot(id).pid(); }
+    long uptimeMillis() { return focusSlot().uptimeMillis(); }
+    long uptimeMillis(String id) { return slot(id).uptimeMillis(); }
+    String lastStatus() { return focusSlot().lastStatus; }
+    String lastStatus(String id) { return slot(id).lastStatus; }
+    ConsoleBuffer console() { return focusSlot().console; }
+    ConsoleBuffer console(String id) { return slot(id).console; }
+    Set<String> players() { return focusSlot().onlinePlayers; }
+    Set<String> players(String id) { return slot(id).onlinePlayers; }
+    boolean sendCommand(String c) { return sendCommand(focus, c); }
+    boolean sendCommand(String id, String c) { if (c.startsWith("/")) c = c.substring(1); return send(slot(id), c); }
+    void requestStart() { requestStart(focus); }
+    void requestStop() { requestStop(focus); }
+    void requestRestart() { requestRestart(focus); }
+    void requestStart(String id) { startAsync(null, id); }
+    void requestStop(String id) { ChildSlot s = slot(id); s.wantRunning = false; exec.submit(() -> stopBlocking(s)); }
+    void requestRestart(String id) { exec.submit(() -> { ChildSlot s = slot(id); s.wantRunning = false; stopBlocking(s); s.attempts = 0; reloadConfig(); reloadProfiles(); startAsync(null, id); }); }
+    void focus(String id) {
+        profile(id);
+        focus = id;
+        getConfig().set("focusServer", id);
+        saveConfigWritable();
+    }
+    void info(String m) { info(focus, m); }
+    void info(String id, String m) { getLogger().info(m); slot(id).console.add("[FabricLauncher] " + m); }
+
+    /** Writes managed server.properties keys back into config so the next start keeps the edit. */
+    boolean syncPropertiesEdit(String id, java.util.Properties p) {
+        ServerProfile pr = profile(id);
+        String prefix = configPrefix(pr);
+        boolean changed = false;
+        for (String k : p.stringPropertyNames()) {
+            String cur = pr.serverProperties.get(k);
+            if (cur != null && !p.getProperty(k).equals(cur)) {
+                getConfig().set(prefix + "serverProperties." + k, parseValue(p.getProperty(k)));
+                changed = true;
+            }
+        }
+        String port = p.getProperty("server-port");
+        if (port != null && !port.trim().equals(String.valueOf(pr.port))) {
+            try { getConfig().set(prefix + "port", Integer.parseInt(port.trim())); changed = true; } catch (NumberFormatException ignored) {}
+        }
+        String ip = p.getProperty("server-ip");
+        if (ip != null && !ip.equals(pr.serverIp == null ? "" : pr.serverIp)) {
+            getConfig().set(prefix + "serverIp", ip);
+            changed = true;
+        }
+        if (changed) { saveConfigWritable(); reloadProfiles(); }
+        return changed;
+    }
+
+    private String configPrefix(ServerProfile pr) {
+        return profiles.isEmpty() || profiles.get(0).id.equals(pr.id) ? "" : "servers." + pr.id + ".";
+    }
+
+    String planText(String id) { return LaunchPlan.text(javaBin(), profile(id)); }
+    Map<String, Object> jarView(String id) throws IOException { return JarProbe.view(JarProbe.inspect(profile(id))); }
+    String jarText(String id) throws IOException { return JarProbe.text(JarProbe.inspect(profile(id))); }
+    List<String> crashFiles(String id) throws IOException { return CrashIndex.list(profile(id).directory()); }
+    String crashText(String id, String file) throws IOException { return CrashIndex.read(profile(id).directory(), file); }
+
+    Path workDir() { return profile(focus).directory(); }
+    Path workDir(String id) { return profile(id).directory(); }
+    List<Path> workDirs() { List<Path> out = new ArrayList<>(); for (ServerProfile p : profiles) out.add(p.directory()); return out; }
 
     Upstream upstream() { return upstream; }
     boolean dashboardTls() { return dashboard != null && dashboard.tls(); }
 
-    List<Double> msptHistory() {
-        int n = Math.min(msptRingN, msptRing.length);
-        int start = msptRingN - n;
-        List<Double> out = new ArrayList<>(n);
-        for (int i = 0; i < n; i++) out.add(msptRing[(start + i) % msptRing.length]);
-        return out;
-    }
+    List<Double> msptHistory() { return focusSlot().msptHistory(); }
+    List<Double> msptHistory(String id) { return slot(id).msptHistory(); }
 
-    private void pushMspt(double v) { msptRing[msptRingN++ % msptRing.length] = v; }
-
-    ProcessProbe.Disk diskCached() {
+    ProcessProbe.Disk diskCached(String id) {
         long now = System.currentTimeMillis();
-        ProcessProbe.Disk cached = diskCache;
-        if (cached != null && now - diskCacheAt < 60_000) return cached;
-        ProcessProbe.Disk fresh = ProcessProbe.disk(workDir(), 100_000);
-        diskCache = fresh; diskCacheAt = now;
+        Long at = diskCacheAt.get(id);
+        ProcessProbe.Disk cached = diskCaches.get(id);
+        if (cached != null && at != null && now - at < 60_000) return cached;
+        ProcessProbe.Disk fresh = ProcessProbe.disk(workDir(id), 100_000);
+        diskCaches.put(id, fresh); diskCacheAt.put(id, now);
         return fresh;
     }
 
-    Map<String, Object> diagMap() {
+    Map<String, Object> diagMap() { return diagMap(focus); }
+    Map<String, Object> diagMap(String id) {
+        ChildSlot s = slot(id);
         Map<String, Object> m = new LinkedHashMap<>();
-        long pid = pid();
-        m.put("running", running());
+        long pid = s.pid();
+        m.put("server", s.id);
+        m.put("running", s.running());
         m.put("pid", pid);
         m.put("tls", dashboardTls());
-        m.put("status", lastStatus);
-        m.put("mspt", childMspt);
-        m.put("tps", childTps);
+        m.put("status", s.lastStatus);
+        m.put("mspt", s.mspt);
+        m.put("tps", s.tps);
         if (pid > 0) m.putAll(ProcessProbe.snapshot(pid));
-        ProcessProbe.Disk d = diskCached();
+        ProcessProbe.Disk d = diskCached(s.id);
         m.put("diskBytes", d.bytes());
         m.put("diskFiles", d.files());
         m.put("diskPartial", d.partial());
         return m;
     }
 
-    String jcmd(String command) throws IOException { return ProcessProbe.jcmd(pid(), command); }
+    String jcmd(String command) throws IOException { return jcmd(focus, command); }
+    String jcmd(String id, String command) throws IOException { return ProcessProbe.jcmd(slot(id).pid(), command); }
 
-    // ---------------- lifecycle ----------------
-    private void startAsync(CommandSender s) {
-        wantRunning = true;
-        exec.submit(() -> {
-            try { launch(); msg(s, "Child server started."); }
-            catch (Exception e) { lastStatus = "start failed: " + e.getMessage(); getLogger().log(Level.SEVERE, "Failed to start child", e); msg(s, "Start failed: " + e.getMessage()); scheduleRestart(); }
-        });
+    List<String> versions(String type) throws Exception {
+        long now = System.currentTimeMillis();
+        Long at = versionCacheAt.get(type);
+        if (at != null && now - at < 600_000 && versionCache.containsKey(type)) return versionCache.get(type);
+        List<String> list = VersionCatalog.fetch(upstream, type, 40);
+        versionCache.put(type, list); versionCacheAt.put(type, now);
+        return list;
     }
 
-    private void launch() throws Exception {
-        synchronized (lock) {
-            if (isRunning()) throw new IllegalStateException("already running");
-            FileConfiguration c = getConfig();
-            Path wd = workDir();
-            boolean fresh = !Files.exists(wd);
-            Files.createDirectories(wd);
-            if (fresh) copyPlayerFiles(wd);
-            lastStatus = "preparing";
-            Path jar = prepareFiles(c, wd);
-            Files.writeString(wd.resolve("eula.txt"), "eula=true\n");
-            writeProperties(c, wd);
-            String javaBin = Paths.get(System.getProperty("java.home"), "bin", isWindows() ? "java.exe" : "java").toString();
-            List<String> cmd = new ArrayList<>();
-            cmd.add(javaBin);
-            cmd.add("-XX:+IgnoreUnrecognizedVMOptions");
-            cmd.add("-Xms" + c.getString("memory.xms", "9G"));
-            cmd.add("-Xmx" + c.getString("memory.xmx", "9G"));
-            for (String fl : c.getStringList("jvmFlags")) { if (!fl.contains("G1RSetUpdatingPauseIntervalMillis")) cmd.add(fl); }
-            cmd.add("-jar"); cmd.add(jar.toString()); cmd.add("nogui");
-            cmd.addAll(c.getStringList("serverArgs"));
-            getLogger().info("Launching child: " + String.join(" ", cmd));
-            Process p = new ProcessBuilder(cmd).directory(wd.toFile()).redirectErrorStream(true).start();
-            process = p; startedAt = System.currentTimeMillis(); onlinePlayers.clear();
-            console.add("[FabricLauncher] Child started, pid " + p.pid());
-            stdin = new BufferedWriter(new OutputStreamWriter(p.getOutputStream(), StandardCharsets.UTF_8));
-            lastStatus = "running";
-            String prefix = c.getString("logPrefix", "[Child] ");
-            exec.submit(() -> pipe(p, prefix));
-            exec.submit(() -> watch(p));
+    List<TaskDef> tasks() {
+        List<?> raw = getConfig().getList("tasks");
+        if (raw == null) return List.of();
+        List<Map<String, Object>> maps = new ArrayList<>();
+        for (Object o : raw) {
+            if (o instanceof Map<?, ?> m) {
+                Map<String, Object> c = new LinkedHashMap<>();
+                m.forEach((k, v) -> c.put(String.valueOf(k), v));
+                maps.add(c);
+            } else if (o instanceof ConfigurationSection s) maps.add(s.getValues(false));
+        }
+        return TaskDef.load(maps);
+    }
+
+    void runTask(TaskDef task) {
+        String id = task.server.isBlank() ? focus : task.server;
+        try {
+            switch (task.action) {
+                case "start" -> startAsync(null, id);
+                case "stop" -> { ChildSlot s = slot(id); s.wantRunning = false; stopBlocking(s); }
+                case "restart" -> requestRestart(id);
+                case "backup" -> runBackup(id);
+                case "command", "save-all" -> {
+                    String cmd = task.action.equals("save-all") || task.command.isBlank() ? "save-all" : task.command;
+                    boolean ok = send(slot(id), cmd.startsWith("/") ? cmd.substring(1) : cmd);
+                    slot(id).console.add("[FabricLauncher] task " + task.id + (ok ? " sent " : " skipped ") + cmd);
+                }
+                default -> throw new IllegalArgumentException("action " + task.action);
+            }
+            noteTask(task.id, "ok");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            noteTask(task.id, "interrupted");
+            getLogger().log(Level.WARNING, "Task " + task.id + " interrupted", e);
+        } catch (Exception e) {
+            noteTask(task.id, e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+            getLogger().log(Level.WARNING, "Task " + task.id + " failed", e);
         }
     }
 
-    private void pipe(Process p, String prefix) {
+    String taskLast(String id) { return taskLast.getOrDefault(id, ""); }
+
+    String taskNext(TaskDef task) {
+        if (task.cron == null || task.cron.isBlank()) return "";
+        try {
+            java.time.ZonedDateTime z = CronExpr.next(task.cron, java.time.ZonedDateTime.now(java.time.ZoneId.of(task.timezone)));
+            return z == null ? "" : z.toString();
+        } catch (RuntimeException e) { return ""; }
+    }
+
+    private void noteTask(String id, String state) {
+        taskLast.put(id, java.time.OffsetDateTime.now() + " " + state);
+    }
+
+    String runBackup(String id) throws Exception {
+        ChildSlot s = slot(id);
+        if (s.running()) {
+            send(s, "save-all");
+            Thread.sleep(Math.max(0, getConfig().getInt("backup.saveWaitSeconds", 3)) * 1000L);
+        }
+        BackupBridge.Result r = BackupBridge.archive(profile(id).directory(), backupSpec(), id);
+        lastBackup = r.path() + " sha256=" + r.sha256() + (r.db().isBlank() ? "" : " db=" + r.db());
+        s.console.add("[FabricLauncher] backup " + lastBackup);
+        getLogger().info("Backup " + lastBackup);
+        return lastBackup;
+    }
+
+    void testBackupDb() throws Exception { BackupBridge.test(backupSpec()); }
+
+    List<BackupBridge.Entry> backupFiles(String id) throws IOException { return BackupBridge.list(backupSpec(), id); }
+
+    Path backupFile(String id, String name) { return BackupBridge.file(backupSpec(), id, name); }
+
+    void deleteBackup(String id, String name) throws IOException { BackupBridge.delete(backupSpec(), id, name); }
+
+    int restoreBackup(String id, String name) throws IOException {
+        if (slot(id).running()) throw new IllegalStateException("stop the server first");
+        int n = BackupBridge.restore(profile(id).directory(), backupSpec(), id, name);
+        slot(id).console.add("[FabricLauncher] restored " + n + " files from " + name);
+        return n;
+    }
+
+    private BackupBridge.Spec backupSpec() {
+        FileConfiguration c = getConfig();
+        String dir = c.getString("backup.directory", "");
+        Path path = dir == null || dir.isBlank() ? getDataFolder().toPath().resolve("backups") : Paths.get(dir);
+        if (!path.isAbsolute()) path = Paths.get("").toAbsolutePath().resolve(path);
+        return new BackupBridge.Spec(path.toString(), c.getStringList("backup.paths"), c.getInt("backup.keep", 5),
+                c.getBoolean("backup.database.enabled"), c.getString("backup.database.jdbcUrl", ""),
+                c.getString("backup.database.user", ""), c.getString("backup.database.password", ""),
+                c.getString("backup.database.driverJar", ""), c.getString("backup.database.driverClass", ""),
+                c.getString("backup.database.table", "fabriclauncher_backups"));
+    }
+
+    private void fireDueTasks() {
+        if (shuttingDown) return;
+        for (TaskDef task : tasks()) {
+            if (!task.enabled || task.cron.isBlank()) continue;
+            java.time.ZoneId zone;
+            try { zone = java.time.ZoneId.of(task.timezone); }
+            catch (Exception e) { getLogger().warning("Task " + task.id + " timezone " + task.timezone); continue; }
+            java.time.ZonedDateTime local = java.time.ZonedDateTime.now(zone);
+            boolean due;
+            try { due = CronExpr.matches(task.cron, local); }
+            catch (RuntimeException e) { getLogger().warning("Task " + task.id + " cron: " + e.getMessage()); continue; }
+            if (!due) continue;
+            String mark = task.id + " " + local.format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMddHHmm"));
+            if (taskFired.putIfAbsent(mark, "1") != null) continue;
+            if (taskFired.size() > 500) taskFired.keySet().removeIf(k -> !k.endsWith(mark.substring(mark.length() - 12)));
+            exec.submit(() -> runTask(task));
+        }
+    }
+
+    // ---------------- lifecycle ----------------
+    private void startAsync(CommandSender s, String id) {
+        exec.submit(() -> {
+            try {
+                if (!allowParallel) for (ChildSlot other : List.copyOf(slots.values())) if (!other.id.equals(id) && other.running()) {
+                    other.wantRunning = false;
+                    stopBlocking(other);
+                }
+                ChildSlot slot = slot(id);
+                if (slot.running()) { msg(s, "Already running."); return; }
+                slot.wantRunning = true;
+                launch(profile(id), slot);
+                msg(s, "Child server started.");
+            } catch (Exception e) {
+                ChildSlot slot = slot(id);
+                slot.lastStatus = "start failed: " + e.getMessage();
+                getLogger().log(Level.SEVERE, "Failed to start child " + id, e);
+                msg(s, "Start failed: " + e.getMessage());
+                scheduleRestart(slot);
+            }
+        });
+    }
+
+    private void launch(ServerProfile profile, ChildSlot slot) throws Exception {
+        synchronized (slot.lock) {
+            if (slot.running()) throw new IllegalStateException("already running");
+            slot.profile = profile;
+            Path wd = profile.directory();
+            boolean fresh = !Files.exists(wd);
+            Files.createDirectories(wd);
+            if (fresh) copyPlayerFiles(wd);
+            slot.lastStatus = "preparing";
+            Path jar = prepareFiles(profile, wd);
+            Files.writeString(wd.resolve("eula.txt"), "eula=true\n");
+            writeProperties(profile, wd);
+            String javaBin = javaBin();
+            List<String> cmd = new ArrayList<>(LaunchPlan.argv(javaBin, profile, jar));
+            getLogger().info("Launching " + profile.id + ": " + String.join(" ", cmd));
+            Process p = new ProcessBuilder(cmd).directory(wd.toFile()).redirectErrorStream(true).start();
+            slot.process = p; slot.startedAt = System.currentTimeMillis(); slot.onlinePlayers.clear();
+            slot.console.add("[FabricLauncher] Child started, pid " + p.pid());
+            slot.stdin = new BufferedWriter(new OutputStreamWriter(p.getOutputStream(), StandardCharsets.UTF_8));
+            slot.lastStatus = "running";
+            String basePrefix = getConfig().getString("logPrefix", "[Child] ");
+            final String prefix = !"default".equals(profile.id) && profiles.size() > 1 ? "[" + profile.id + "] " : basePrefix;
+            exec.submit(() -> pipe(slot, p, prefix));
+            exec.submit(() -> watch(slot, p));
+        }
+    }
+
+    private void pipe(ChildSlot slot, Process p, String prefix) {
         try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
             String line;
             while ((line = r.readLine()) != null) {
-                if (parseTick(line)) continue;
+                if (parseTick(slot, line)) continue;
                 getLogger().info(prefix + line);
-                console.add(line);
-                trackPlayers(line);
+                slot.console.add(line);
+                trackPlayers(slot, line);
             }
         } catch (IOException ignored) {}
     }
@@ -231,90 +436,89 @@ public final class FabricLauncherPlugin extends JavaPlugin {
     }
 
     /** Sends 'tick query' to the child at most every 10 s (called from dashboard status polling). */
-    void maybeQueryChildTick() {
+    void maybeQueryChildTick(String id) {
+        ChildSlot slot = slot(id);
         long now = System.currentTimeMillis();
-        if (!isRunning() || now - tickQueryAt < 10_000 || now - startedAt < 30_000) return;
-        tickQueryAt = now;
-        send("tick query");
+        if (!slot.running() || now - slot.queryAt < 10_000 || now - slot.startedAt < 30_000) return;
+        slot.queryAt = now;
+        send(slot, "tick query");
     }
 
     /** Returns true if the line belongs to a tick-query answer (hidden from console/log). */
-    private boolean parseTick(String line) {
-        long before = ticks.tickAt;
-        boolean hide = ticks.consume(line, tickQueryAt, System.currentTimeMillis());
-        if (hide && ticks.tickAt != before) {
-            childMspt = ticks.mspt;
-            childTps = ticks.tps;
-            childTickAt = ticks.tickAt;
-            pushMspt(childMspt);
+    private boolean parseTick(ChildSlot slot, String line) {
+        long before = slot.ticks.tickAt;
+        boolean hide = slot.ticks.consume(line, slot.queryAt, System.currentTimeMillis());
+        if (hide && slot.ticks.tickAt != before) {
+            slot.mspt = slot.ticks.mspt;
+            slot.tps = slot.ticks.tps;
+            slot.tickAt = slot.ticks.tickAt;
+            slot.pushMspt(slot.mspt);
         }
         return hide;
     }
 
-    private void trackPlayers(String line) {
-        var m = JOIN.matcher(line); if (m.find()) { onlinePlayers.add(m.group(1)); return; }
-        m = LEFT.matcher(line); if (m.find()) { onlinePlayers.remove(m.group(1)); return; }
+    private void trackPlayers(ChildSlot slot, String line) {
+        var m = JOIN.matcher(line); if (m.find()) { slot.onlinePlayers.add(m.group(1)); return; }
+        m = LEFT.matcher(line); if (m.find()) { slot.onlinePlayers.remove(m.group(1)); return; }
         m = LIST.matcher(line);
         if (m.find()) {
-            onlinePlayers.clear();
-            for (String n : m.group(1).split(",")) { n = n.trim(); if (!n.isEmpty()) onlinePlayers.add(n); }
+            slot.onlinePlayers.clear();
+            for (String n : m.group(1).split(",")) { n = n.trim(); if (!n.isEmpty()) slot.onlinePlayers.add(n); }
         }
     }
 
-    private void watch(Process p) {
+    private void watch(ChildSlot slot, Process p) {
         try {
             int code = p.waitFor();
-            long up = System.currentTimeMillis() - startedAt;
-            synchronized (lock) { if (process == p) { process = null; stdin = null; } }
-            lastStatus = "exited (code " + code + ")";
-            onlinePlayers.clear();
-            console.add("[FabricLauncher] Child exited with code " + code);
-            getLogger().warning("Child server exited with code " + code + " after " + up / 1000 + "s");
-            if (up >= getConfig().getLong("autoRestart.resetAfterSeconds", 600) * 1000L) attempts = 0;
-            if (wantRunning && !shuttingDown) scheduleRestart();
+            long up = System.currentTimeMillis() - slot.startedAt;
+            synchronized (slot.lock) { if (slot.process == p) { slot.process = null; slot.stdin = null; } }
+            slot.lastStatus = "exited (code " + code + ")";
+            slot.onlinePlayers.clear();
+            slot.console.add("[FabricLauncher] Child exited with code " + code);
+            getLogger().warning("Child " + slot.id + " exited with code " + code + " after " + up / 1000 + "s");
+            if (up >= getConfig().getLong("autoRestart.resetAfterSeconds", 600) * 1000L) slot.attempts = 0;
+            if (slot.wantRunning && !shuttingDown) scheduleRestart(slot);
         } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
     }
 
-    private void scheduleRestart() {
-        if (!wantRunning || shuttingDown || !getConfig().getBoolean("autoRestart.enabled", true)) return;
+    private void scheduleRestart(ChildSlot slot) {
+        if (!slot.wantRunning || shuttingDown || !getConfig().getBoolean("autoRestart.enabled", true)) return;
         int max = getConfig().getInt("autoRestart.maxAttempts", 0);
-        if (max > 0 && attempts >= max) { getLogger().severe("Max restart attempts reached; giving up. Use /child start."); wantRunning = false; lastStatus += ", gave up"; return; }
+        if (max > 0 && slot.attempts >= max) { getLogger().severe("Max restart attempts reached for " + slot.id + "; giving up."); slot.wantRunning = false; slot.lastStatus += ", gave up"; return; }
         long base = getConfig().getLong("autoRestart.initialDelaySeconds", 5);
         long cap = getConfig().getLong("autoRestart.maxDelaySeconds", 300);
-        long delay = RestartBackoff.delaySeconds(base, cap, attempts);
-        attempts++;
-        lastStatus += ", restarting in " + delay + "s (attempt " + attempts + ")";
-        getLogger().warning("Restarting child in " + delay + "s (attempt " + attempts + ")");
+        long delay = RestartBackoff.delaySeconds(base, cap, slot.attempts);
+        slot.attempts++;
+        slot.lastStatus += ", restarting in " + delay + "s (attempt " + slot.attempts + ")";
+        getLogger().warning("Restarting " + slot.id + " in " + delay + "s (attempt " + slot.attempts + ")");
         exec.submit(() -> {
             try { Thread.sleep(delay * 1000L); } catch (InterruptedException e) { return; }
-            if (!wantRunning || shuttingDown || isRunning()) return;
-            try { launch(); } catch (Exception e) { getLogger().log(Level.SEVERE, "Restart failed", e); scheduleRestart(); }
+            if (!slot.wantRunning || shuttingDown || slot.running()) return;
+            try { launch(profile(slot.id), slot); } catch (Exception e) { getLogger().log(Level.SEVERE, "Restart failed", e); scheduleRestart(slot); }
         });
     }
 
-    private boolean isRunning() { Process p = process; return p != null && p.isAlive(); }
-
-    private boolean send(String command) {
-        BufferedWriter w = stdin;
-        if (w == null || !isRunning()) return false;
+    private boolean send(ChildSlot slot, String command) {
+        BufferedWriter w = slot.stdin;
+        if (w == null || !slot.running()) return false;
         try { synchronized (w) { w.write(command); w.newLine(); w.flush(); } return true; }
         catch (IOException e) { return false; }
     }
 
     /** Sends "stop", waits stopTimeoutSeconds, then kills. Blocks. */
-    private void stopBlocking() {
-        Process p = process;
-        if (p == null || !p.isAlive()) return;
-        stopProcess(p, getConfig().getLong("stopTimeoutSeconds", 60), false);
+    private void stopBlocking(ChildSlot slot) {
+        if (!slot.running()) return;
+        stopProcess(slot, getConfig().getLong("stopTimeoutSeconds", 60), false);
     }
 
     /** Thread-safe (onDisable + shutdown hook may race). useStdout: logger may be gone during JVM shutdown. */
-    private void stopProcess(Process p, long timeout, boolean useStdout) {
-        synchronized (stopLock) {
-            if (!p.isAlive()) return;
-            java.util.function.Consumer<String> log = m -> { if (useStdout) System.out.println("[FabricLauncher] " + m); else info(m); };
-            log.accept("Stopping child server (pid " + p.pid() + ", waiting up to " + timeout + "s for clean save)...");
-            BufferedWriter w = stdin;
+    private void stopProcess(ChildSlot slot, long timeout, boolean useStdout) {
+        synchronized (slot.stopLock) {
+            Process p = slot.process;
+            if (p == null || !p.isAlive()) return;
+            java.util.function.Consumer<String> log = m -> { if (useStdout) System.out.println("[FabricLauncher] " + m); else { getLogger().info(m); slot.console.add("[FabricLauncher] " + m); } };
+            log.accept("Stopping " + slot.id + " (pid " + p.pid() + ", waiting up to " + timeout + "s for clean save)...");
+            BufferedWriter w = slot.stdin;
             try { if (w != null) synchronized (w) { w.write("stop"); w.newLine(); w.flush(); } } catch (IOException e) { log.accept("Could not send 'stop': " + e.getMessage()); }
             try {
                 if (p.waitFor(timeout, TimeUnit.SECONDS)) {
@@ -337,13 +541,59 @@ public final class FabricLauncherPlugin extends JavaPlugin {
         if (!s.hasPermission("fabriclauncher.admin")) { s.sendMessage("No permission."); return true; }
         if (a.length == 0) return false;
         switch (a[0].toLowerCase(Locale.ROOT)) {
-            case "start" -> { if (isRunning()) s.sendMessage("Already running."); else { attempts = 0; s.sendMessage("Starting child (downloads may take a while)..."); startAsync(s); } }
-            case "stop" -> { wantRunning = false; s.sendMessage("Stopping child..."); exec.submit(() -> { stopBlocking(); msg(s, "Child stopped."); }); }
-            case "restart" -> { s.sendMessage("Restarting child..."); exec.submit(() -> { wantRunning = false; stopBlocking(); attempts = 0; reloadConfig(); startAsync(s); }); }
+            case "start" -> { s.sendMessage("Starting " + focus + " (downloads may take a while)..."); startAsync(s, focus); }
+            case "stop" -> { focusSlot().wantRunning = false; s.sendMessage("Stopping " + focus + "..."); ChildSlot cur = focusSlot(); exec.submit(() -> { stopBlocking(cur); msg(s, "Child stopped."); }); }
+            case "restart" -> { s.sendMessage("Restarting " + focus + "..."); requestRestart(focus); }
             case "status" -> {
-                Process p = process;
-                s.sendMessage("Child: " + (isRunning() ? "RUNNING pid " + p.pid() + ", up " + (System.currentTimeMillis() - startedAt) / 1000 + "s" : "NOT RUNNING") + " | " + lastStatus);
-                s.sendMessage("Type " + getConfig().getString("type") + " " + getConfig().getString("mcVersion") + " on port " + getConfig().getInt("port") + ", dir " + workDir());
+                ChildSlot cur = focusSlot();
+                ServerProfile pr = profile(focus);
+                s.sendMessage(cur.id + ": " + (cur.running() ? "RUNNING pid " + cur.pid() + ", up " + cur.uptimeMillis() / 1000 + "s" : "NOT RUNNING") + " | " + cur.lastStatus);
+                s.sendMessage("Type " + pr.type + " " + pr.mcVersion + " on port " + pr.port + ", dir " + pr.directory());
+            }
+            case "servers" -> { for (ServerProfile pr : profiles) s.sendMessage((pr.id.equals(focus) ? "* " : "  ") + pr.id + " " + pr.type + " " + pr.mcVersion + " :" + pr.port + (Profiles.portClash(profiles, pr.port) ? " CLASH" : "") + (slot(pr.id).running() ? " RUNNING" : "")); }
+            case "focus" -> { if (a.length < 2) { s.sendMessage("focus " + focus); return true; } focus(a[1]); s.sendMessage("focus " + focus); }
+            case "tasks" -> { for (TaskDef t : tasks()) s.sendMessage((t.enabled ? "on  " : "off ") + t.id + " " + t.cron + " " + t.timezone + " " + t.action + " next " + taskNext(t)); }
+            case "task" -> {
+                if (a.length < 3 || !a[1].equalsIgnoreCase("run")) { s.sendMessage("/child task run <id>"); return true; }
+                TaskDef found = null; for (TaskDef t : tasks()) if (t.id.equals(a[2])) found = t;
+                if (found == null) s.sendMessage("Unknown task"); else { TaskDef run = found; exec.submit(() -> runTask(run)); s.sendMessage("Task " + a[2]); }
+            }
+            case "backup" -> {
+                if (a.length >= 2 && a[1].equalsIgnoreCase("list")) {
+                    try { for (var e : backupFiles(focus)) s.sendMessage(e.name() + " " + e.bytes()); }
+                    catch (IOException e) { s.sendMessage("Failed: " + e.getMessage()); }
+                } else if (a.length >= 3 && a[1].equalsIgnoreCase("delete")) {
+                    try { deleteBackup(focus, a[2]); s.sendMessage("Deleted " + a[2]); }
+                    catch (Exception e) { s.sendMessage("Failed: " + e.getMessage()); }
+                } else if (a.length >= 3 && a[1].equalsIgnoreCase("restore")) {
+                    String file = a[2];
+                    exec.submit(() -> { try { msg(s, "Restored " + restoreBackup(focus, file) + " files"); } catch (Exception e) { msg(s, "Restore failed: " + e.getMessage()); } });
+                } else { s.sendMessage("Backup " + focus + "..."); exec.submit(() -> { try { msg(s, runBackup(focus)); } catch (Exception e) { msg(s, "Backup failed: " + e.getMessage()); } }); }
+            }
+            case "versions" -> {
+                if (a.length < 2) { s.sendMessage("/child versions <fabric|paper|vanilla|spigot>"); return true; }
+                exec.submit(() -> { try { for (String v : versions(a[1])) msg(s, v); } catch (Exception e) { msg(s, "Versions failed: " + e.getMessage()); } });
+            }
+            case "plan" -> s.sendMessage(planText(focus));
+            case "jar" -> {
+                try { s.sendMessage(jarText(focus)); }
+                catch (IOException e) { s.sendMessage("Failed: " + e.getMessage()); }
+            }
+            case "crashes" -> {
+                try {
+                    if (a.length < 2) {
+                        List<String> files = crashFiles(focus);
+                        if (files.isEmpty()) s.sendMessage("no crash-reports");
+                        for (String f : files) s.sendMessage(f);
+                    } else {
+                        String text = crashText(focus, a[1]);
+                        String[] lines = text.split("\n", -1);
+                        int n = Math.min(lines.length, 40);
+                        for (int i = 0; i < n; i++) s.sendMessage(lines[i]);
+                        if (lines.length > n) s.sendMessage("... " + (lines.length - n) + " more lines in the dashboard");
+                    }
+                } catch (IOException e) { s.sendMessage("Failed: " + e.getMessage()); }
+                catch (SecurityException e) { s.sendMessage("Failed: " + e.getMessage()); }
             }
             case "cmd" -> {
                 if (a.length < 2) { s.sendMessage("/child cmd <command>"); return true; }
@@ -403,13 +653,15 @@ public final class FabricLauncherPlugin extends JavaPlugin {
             case "search" -> {
                 if (a.length < 3) { s.sendMessage("/child mod search <text>"); return; }
                 String q = String.join(" ", Arrays.copyOfRange(a, 2, a.length));
-                for (var hit : ModAdmin.search(upstream, getConfig().getString("type"), q))
+                ServerProfile pr = profile(focus);
+                for (var hit : ModAdmin.search(upstream, pr.type, q))
                     s.sendMessage(hit.get("slug") + "  " + hit.get("title") + "  " + hit.get("downloads"));
             }
             case "install" -> {
                 if (a.length < 3) { s.sendMessage("/child mod install <slug> [version]"); return; }
                 String ver = a.length > 3 ? a[3] : "";
-                var r = ModAdmin.install(upstream, workDir(), getConfig().getString("type"), getConfig().getString("mcVersion"), a[2], ver);
+                ServerProfile pr = profile(focus);
+                var r = ModAdmin.install(upstream, pr.directory(), pr.type, pr.mcVersion, a[2], ver);
                 s.sendMessage("Installed " + r.get("path") + " " + r.get("version") + " (active after child restart)");
             }
             case "toggle" -> {
@@ -425,7 +677,13 @@ public final class FabricLauncherPlugin extends JavaPlugin {
     @Override public List<String> onTabComplete(CommandSender s, Command c, String l, String[] a) {
         if (a.length == 2 && (a[0].equalsIgnoreCase("config") || a[0].equalsIgnoreCase("prop"))) return List.of("set");
         if (a.length == 2 && a[0].equalsIgnoreCase("mod")) return List.of("install", "toggle", "search").stream().filter(x -> x.startsWith(a[1].toLowerCase(Locale.ROOT))).toList();
-        if (a.length == 1) return List.of("start", "stop", "restart", "status", "cmd", "config", "prop", "mods", "mod", "diag", "threaddump", "heap", "flags").stream().filter(x -> x.startsWith(a[0].toLowerCase(Locale.ROOT))).toList();
+        if (a.length == 1) return List.of("start", "stop", "restart", "status", "cmd", "config", "prop", "mods", "mod", "diag", "threaddump", "heap", "flags", "servers", "focus", "tasks", "task", "backup", "versions", "plan", "crashes", "jar").stream().filter(x -> x.startsWith(a[0].toLowerCase(Locale.ROOT))).toList();
+        if (a.length == 2 && a[0].equalsIgnoreCase("crashes")) {
+            try { return crashFiles(focus).stream().filter(x -> x.startsWith(a[1])).toList(); }
+            catch (IOException e) { return List.of(); }
+        }
+        if (a.length == 2 && a[0].equalsIgnoreCase("focus")) return profiles.stream().map(p -> p.id).filter(x -> x.startsWith(a[1])).toList();
+        if (a.length == 2 && a[0].equalsIgnoreCase("versions")) return List.of("fabric", "paper", "vanilla", "spigot").stream().filter(x -> x.startsWith(a[1].toLowerCase(Locale.ROOT))).toList();
         return List.of();
     }
 
@@ -435,21 +693,25 @@ public final class FabricLauncherPlugin extends JavaPlugin {
     }
 
     // ---------------- files ----------------
-    private Path prepareFiles(FileConfiguration c, Path wd) throws Exception {
-        String type = c.getString("type", "fabric").toLowerCase(Locale.ROOT);
-        String mc = c.getString("mcVersion", "26.3");
+    private Path prepareFiles(ServerProfile c, Path wd) throws Exception {
+        String type = c.type.toLowerCase(Locale.ROOT);
+        String mc = c.mcVersion;
         switch (type) {
             case "fabric": {
                 Path jar = wd.resolve("fabric-server-launch-" + mc + ".jar");
                 if (!Files.exists(jar)) {
-                    String loader = c.getString("fabricLoaderVersion", "latest");
-                    String inst = c.getString("fabricInstallerVersion", "latest");
+                    String loader = c.fabricLoaderVersion;
+                    String inst = c.fabricInstallerVersion;
                     if ("latest".equalsIgnoreCase(loader)) loader = firstStable(upstream.getJson("https://meta.fabricmc.net/v2/versions/loader/" + mc).getAsJsonArray(), true);
                     if ("latest".equalsIgnoreCase(inst)) inst = firstStable(upstream.getJson("https://meta.fabricmc.net/v2/versions/installer").getAsJsonArray(), false);
                     upstream.download("https://meta.fabricmc.net/v2/versions/loader/" + mc + "/" + loader + "/" + inst + "/server/jar", jar);
                 }
-                downloadMods(c, wd.resolve("mods"), mc);
+                downloadMods(c.mods, wd.resolve("mods"), mc);
                 return jar;
+            }
+            case "spigot": {
+                String javaBin = Paths.get(System.getProperty("java.home"), "bin", isWindows() ? "java.exe" : "java").toString();
+                return SpigotBuilder.build(upstream, getDataFolder().toPath(), mc, wd, javaBin, m -> { getLogger().info(m); });
             }
             case "paper": {
                 Path jar = wd.resolve("paper-" + mc + ".jar");
@@ -479,8 +741,7 @@ public final class FabricLauncherPlugin extends JavaPlugin {
                 return jar;
             }
             case "custom": {
-                Path jar = Paths.get(c.getString("customJar", "server.jar"));
-                if (!jar.isAbsolute()) jar = wd.resolve(jar);
+                Path jar = Paths.get(c.customJar);
                 if (!Files.exists(jar)) throw new FileNotFoundException("Custom jar not found: " + jar);
                 return jar;
             }
@@ -488,12 +749,12 @@ public final class FabricLauncherPlugin extends JavaPlugin {
         }
     }
 
-    private void downloadMods(FileConfiguration c, Path modsDir, String mc) throws Exception {
+    private void downloadMods(Map<String, Boolean> mods, Path modsDir, String mc) throws Exception {
         Files.createDirectories(modsDir);
-        ConfigurationSection sec = c.getConfigurationSection("mods");
-        if (sec == null) return;
-        for (String slug : sec.getKeys(false)) {
-            if (!sec.getBoolean(slug)) continue;
+        if (mods == null || mods.isEmpty()) return;
+        for (var en : mods.entrySet()) {
+            if (!Boolean.TRUE.equals(en.getValue())) continue;
+            String slug = en.getKey();
             try (var st = Files.list(modsDir)) {
                 if (st.anyMatch(f -> f.getFileName().toString().startsWith(".fl-" + slug + "-"))) continue; // marker exists
             }
@@ -546,13 +807,16 @@ public final class FabricLauncherPlugin extends JavaPlugin {
         return v;
     }
 
-    /** Sets one key in the child server.properties and, if the key is managed via config serverProperties, there too. */
-    void setChildProperty(String key, String value) throws IOException {
-        Path wd = workDir(); Files.createDirectories(wd);
+    /** Sets one key in the focused child's server.properties and, if the key is managed, in config too. */
+    void setChildProperty(String key, String value) throws IOException { setChildProperty(focus, key, value); }
+
+    void setChildProperty(String id, String key, String value) throws IOException {
+        Path wd = profile(id).directory();
+        Files.createDirectories(wd);
         updateProperties(wd.resolve("server.properties"), Map.of(key, value), Map.of());
-        if (getConfig().isSet("serverProperties." + key)) { getConfig().set("serverProperties." + key, value); saveConfigWritable(); }
-        if (key.equals("server-port")) { getConfig().set("port", Integer.parseInt(value)); saveConfigWritable(); }
-        if (key.equals("server-ip")) { getConfig().set("serverIp", value); saveConfigWritable(); }
+        java.util.Properties p = new java.util.Properties();
+        p.setProperty(key, value);
+        syncPropertiesEdit(id, p);
     }
 
     /** Line-based edit: keeps comments, order and all other keys. force = always set, defaults = only if absent. */
@@ -560,12 +824,11 @@ public final class FabricLauncherPlugin extends JavaPlugin {
         PropertiesFile.update(f, force, defaults);
     }
 
-    private void writeProperties(FileConfiguration c, Path wd) throws IOException {
+    private void writeProperties(ServerProfile c, Path wd) throws IOException {
         Map<String, String> force = new LinkedHashMap<>();
-        ConfigurationSection extra = c.getConfigurationSection("serverProperties");
-        if (extra != null) for (String k : extra.getKeys(false)) force.put(k, String.valueOf(extra.get(k)));
-        force.put("server-port", String.valueOf(c.getInt("port", 2063)));
-        force.put("server-ip", c.getString("serverIp", ""));
+        if (c.serverProperties != null) force.putAll(c.serverProperties);
+        force.put("server-port", String.valueOf(c.port));
+        force.put("server-ip", c.serverIp == null ? "" : c.serverIp);
         Map<String, String> defaults = new LinkedHashMap<>();
         defaults.put("level-name", "world");
         defaults.put("white-list", "false");
@@ -573,6 +836,10 @@ public final class FabricLauncherPlugin extends JavaPlugin {
         defaults.put("enable-rcon", "false");
         defaults.put("enable-query", "false");
         updateProperties(wd.resolve("server.properties"), force, defaults);
+    }
+
+    static String javaBin() {
+        return Paths.get(System.getProperty("java.home"), "bin", isWindows() ? "java.exe" : "java").toString();
     }
 
     private static String str(JsonObject o, String k) { JsonElement e = o.get(k); return e == null || e.isJsonNull() ? null : e.getAsString(); }

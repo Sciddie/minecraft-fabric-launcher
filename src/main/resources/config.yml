@@ -1,4 +1,4 @@
-# Child server type: fabric | paper | vanilla | custom
+# Child server type: fabric | paper | spigot | vanilla | custom
 type: fabric
 mcVersion: "26.3"
 # Second open port of the Zap-Hosting package (2064 is kept free, e.g. for a 2nd instance/query)
@@ -95,6 +95,34 @@ dashboard:
     days: 825
     dn: "CN=FabricLauncher"
     sans: []
+# Id of the root profile (the keys above). Extra profiles live under servers.<id>.
+serverId: default
+# Profile used by /child and the dashboard when no id is given.
+focusServer: default
+# false: starting one profile stops the others, and only the focus profile auto-starts.
+allowParallel: false
+# Extra profiles inherit memory, jvmFlags, serverArgs, serverIp, fabric versions and serverProperties.
+# They do not inherit mods. A missing workingDir becomes ./child-<id>. Set port per profile.
+servers: {}
+# Five-field cron: minute hour day-of-month month day-of-week. Both day fields set means OR.
+# timezone is a ZoneId. action: command | save-all | start | stop | restart | backup
+tasks: []
+# Zip of backup.paths inside the profile directory. Created only when a backup runs.
+# database.* is an external JDBC target. Nothing is installed locally; driverJar is loaded on use.
+backup:
+  directory: ""
+  paths:
+    - world
+  keep: 5
+  saveWaitSeconds: 3
+  database:
+    enabled: false
+    jdbcUrl: ""
+    user: ""
+    password: ""
+    driverJar: ""
+    driverClass: ""
+    table: fabriclauncher_backups
 # Neuter the outer Spigot (lobby) server: patches its server.properties / bukkit.yml / spigot.yml on enable
 # (effective from the next Spigot start) and applies runtime tweaks to the outer worlds. Never touches the child.
 neuterOuter: true

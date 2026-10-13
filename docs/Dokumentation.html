@@ -3,7 +3,7 @@ h1{border-bottom:3px solid #3a8f3a;padding-bottom:.3em}h2{margin-top:2em;color:#
 table{border-collapse:collapse;width:100%;margin:1em 0}th,td{border:1px solid #d0d7de;padding:6px 10px;text-align:left;vertical-align:top}th{background:#e8f2e8}tr:nth-child(even) td{background:#f4f6f8}
 code{background:#eef0f3;padding:1px 5px;border-radius:4px;font-size:.92em}pre{background:#1e2430;color:#e6e6e6;padding:1em;border-radius:8px;overflow:auto}pre code{background:none;color:inherit}
 blockquote{border-left:4px solid #e0a800;background:#fff8e1;margin:1em 0;padding:.5em 1em}</style></head><body><h1>FabricLauncher – Dokumentation</h1>
-<p><em>Stand: 13.10.2026 · Plugin-Version 1.3.0 · Spigot 26.3 / Java 25 · Zap-Hosting-Server <code>g266459</code></em></p>
+<p><em>Stand: 13.10.2026 · Plugin-Version 1.4.0 · Spigot 26.3 / Java 25 · Zap-Hosting-Server <code>g266459</code></em></p>
 <p><strong>Neu aufsetzen:</strong> Schritt für Schritt auf einem neuen Spigot-Server steht in <a href="SETUP.md">SETUP.md</a>.</p>
 <h2>1. Zweck und Architektur</h2>
 <p>Zap-Hosting bietet für dieses Paket nur Spigot an. <strong>FabricLauncher</strong> ist ein Spigot-Plugin, das daraus einen „Wirt“ macht:</p>
@@ -60,7 +60,7 @@ blockquote{border-left:4px solid #e0a800;background:#fff8e1;margin:1em 0;padding
 <h2>3. Installation</h2>
 <p>Die ausführliche Ersteinrichtung (Voraussetzungen, FTP, erster Start, <code>config.yml</code>, Weltumzug, Dashboard) steht in <a href="SETUP.md">SETUP.md</a>. Kurzfassung:</p>
 <ol>
-<li><code>FabricLauncher-1.3.0.jar</code> nach <code>plugins/</code> hochladen (FTP).</li>
+<li><code>FabricLauncher-1.4.0.jar</code> nach <code>plugins/</code> hochladen (FTP).</li>
 <li>Spigot starten. Beim ersten Start:</li>
 <li><code>plugins/FabricLauncher/config.yml</code> wird erzeugt,</li>
 <li>Dashboard-Passwort wird erzeugt (<code>plugins/FabricLauncher/dashboard-password.txt</code>, einmalig im Log),</li>
@@ -277,7 +277,7 @@ blockquote{border-left:4px solid #e0a800;background:#fff8e1;margin:1em 0;padding
 <li><strong>Konsole</strong> live (SSE) mit Befehlseingabe, <strong>Spieler</strong> (Whitelist/OP/Kick/Ban), Editor für <strong>server.properties</strong> und <strong>config.yml</strong>, <strong>Dateimanager</strong> (nur innerhalb <code>child-server/</code>, Upload bis 1 GB, Löschen nur einzelner Dateien/leerer Ordner mit Bestätigung), <strong>Logs</strong> (auch <code>.gz</code>).</li>
 </ul>
 <blockquote>
-<p>Ab 1.1.0: optionales Dashboard-TLS (<code>dashboard.https</code>), Mod-/Plugin-Liste mit <code>.jar.disabled</code>, Log-Filter, lesende Diagnose (<code>jcmd</code>, MSPT aus <code>tick query</code>). Ab 1.3.0: mehrere Profile (Fabric, Paper, Spigot, Vanilla), Cron mit Zeitzone, Zip-Backup mit optionaler externer JDBC-Metadatenbank, Versionsliste. Spigot-Jars nur über BuildTools und nur beim Start. <code>config.yml</code> und <code>server.properties</code> bleiben Rohtext. Vorbilder: Pterodactyl Wings, Crafty Controller, spark (nur die Darstellung), Paper Fill v3, Prism/Modrinth, Spigot BuildTools.</p>
+<p>Ab 1.1.0: optionales Dashboard-TLS (<code>dashboard.https</code>), Mod-/Plugin-Liste mit <code>.jar.disabled</code>, Log-Filter, lesende Diagnose (<code>jcmd</code>, MSPT aus <code>tick query</code>). Ab 1.3.0: mehrere Profile (Fabric, Paper, Spigot, Vanilla), Cron mit Zeitzone, Zip-Backup mit optionaler externer JDBC-Metadatenbank, Versionsliste. Ab 1.4.0: lokaler Blick auf das Jar aus dem argv (`/child jar`, Diagnose-Button jar), ohne Download und ohne den Inhalt zu lesen. Spigot-Jars nur über BuildTools und nur beim Start. <code>config.yml</code> und <code>server.properties</code> bleiben Rohtext. Vorbilder: Pterodactyl Wings, Crafty Controller, spark (nur die Darstellung), Paper Fill v3, Prism/Modrinth, Spigot BuildTools.</p>
 <p><strong>Sicherheitshinweis:</strong> Ohne <code>dashboard.https.enabled</code> läuft das Dashboard über <strong>unverschlüsseltes HTTP</strong>. Passwort und Sitzungscookie können in fremden Netzen mitgelesen werden. Nur aus vertrauenswürdigen Netzen nutzen, starkes Passwort verwenden, bei Verdacht Passwort-Datei ändern und Spigot neu starten. Mit TLS setzt das Cookie <code>Secure</code>. Das Dashboard hat Vollzugriff auf den Child-Server (Konsole, Dateien).</p>
 </blockquote>
 <h2>7. OuterTuner (äußerer Spigot)</h2>

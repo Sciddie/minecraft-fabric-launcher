@@ -184,6 +184,8 @@ public final class FabricLauncherPlugin extends JavaPlugin {
     }
 
     String planText(String id) { return LaunchPlan.text(javaBin(), profile(id)); }
+    Map<String, Object> jarView(String id) throws IOException { return JarProbe.view(JarProbe.inspect(profile(id))); }
+    String jarText(String id) throws IOException { return JarProbe.text(JarProbe.inspect(profile(id))); }
     List<String> crashFiles(String id) throws IOException { return CrashIndex.list(profile(id).directory()); }
     String crashText(String id, String file) throws IOException { return CrashIndex.read(profile(id).directory(), file); }
 
@@ -573,6 +575,10 @@ public final class FabricLauncherPlugin extends JavaPlugin {
                 exec.submit(() -> { try { for (String v : versions(a[1])) msg(s, v); } catch (Exception e) { msg(s, "Versions failed: " + e.getMessage()); } });
             }
             case "plan" -> s.sendMessage(planText(focus));
+            case "jar" -> {
+                try { s.sendMessage(jarText(focus)); }
+                catch (IOException e) { s.sendMessage("Failed: " + e.getMessage()); }
+            }
             case "crashes" -> {
                 try {
                     if (a.length < 2) {
@@ -671,7 +677,7 @@ public final class FabricLauncherPlugin extends JavaPlugin {
     @Override public List<String> onTabComplete(CommandSender s, Command c, String l, String[] a) {
         if (a.length == 2 && (a[0].equalsIgnoreCase("config") || a[0].equalsIgnoreCase("prop"))) return List.of("set");
         if (a.length == 2 && a[0].equalsIgnoreCase("mod")) return List.of("install", "toggle", "search").stream().filter(x -> x.startsWith(a[1].toLowerCase(Locale.ROOT))).toList();
-        if (a.length == 1) return List.of("start", "stop", "restart", "status", "cmd", "config", "prop", "mods", "mod", "diag", "threaddump", "heap", "flags", "servers", "focus", "tasks", "task", "backup", "versions", "plan", "crashes").stream().filter(x -> x.startsWith(a[0].toLowerCase(Locale.ROOT))).toList();
+        if (a.length == 1) return List.of("start", "stop", "restart", "status", "cmd", "config", "prop", "mods", "mod", "diag", "threaddump", "heap", "flags", "servers", "focus", "tasks", "task", "backup", "versions", "plan", "crashes", "jar").stream().filter(x -> x.startsWith(a[0].toLowerCase(Locale.ROOT))).toList();
         if (a.length == 2 && a[0].equalsIgnoreCase("crashes")) {
             try { return crashFiles(focus).stream().filter(x -> x.startsWith(a[1])).toList(); }
             catch (IOException e) { return List.of(); }

@@ -186,6 +186,7 @@ final class Dashboard {
                     json(ex, 200, Map.of("ok", true, "id", id));
                 }
                 case "GET /api/plan" -> text(ex, pl.planText(sid));
+                case "GET /api/jar" -> json(ex, 200, pl.jarView(sid));
                 case "GET /api/crashes" -> json(ex, 200, pl.crashFiles(sid));
                 case "GET /api/crashes/read" -> text(ex, pl.crashText(sid, q.get("file")));
                 case "GET /api/versions" -> {

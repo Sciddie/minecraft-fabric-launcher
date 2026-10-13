@@ -49,6 +49,9 @@ class HosterTest {
         assertTrue(paper.directory().endsWith("child-paper-test"));
         assertEquals("hi", paper.serverProperties.get("motd"));
         assertEquals("paper-test", Profiles.focus(cfg, all));
+        assertFalse(Profiles.portClash(all, 2063));
+        cfg.put("servers.paper-test.port", 2063);
+        assertTrue(Profiles.portClash(Profiles.load(cfg), 2063));
     }
 
     @Test void cronRespectsZoneAndSunday() {
@@ -65,6 +68,9 @@ class HosterTest {
         assertTrue(CronExpr.matches("0 5 * * 7", sunday));
         assertFalse(CronExpr.matches("0 5 * * 1", sunday));
         assertThrows(IllegalArgumentException.class, () -> CronExpr.matches("0 5 * *", sunday));
+        ZonedDateTime before = berlin.minusMinutes(1);
+        assertEquals(berlin.withSecond(0).withNano(0), CronExpr.next("0 4 * * *", before));
+        assertEquals(berlin.plusDays(1).withSecond(0).withNano(0), CronExpr.next("0 4 * * *", berlin));
     }
 
     @Test void tasksParse() {
@@ -121,5 +127,24 @@ class HosterTest {
         }
         assertEquals(3, BackupBridge.count(spec));
         assertThrows(IllegalArgumentException.class, () -> BackupBridge.table(new BackupBridge.Spec("", List.of(), 1, false, "", "", "", "", "", "bad-name;drop")));
+        List<BackupBridge.Entry> listed = BackupBridge.list(spec, "default");
+        assertEquals(2, listed.size());
+        String name = listed.get(0).name();
+        Path fresh = Files.createDirectories(tmp.resolve("restored"));
+        Files.writeString(fresh.resolve("old.txt"), "x");
+        assertEquals(1, BackupBridge.restore(fresh, spec, "default", name));
+        assertEquals("world", Files.readString(fresh.resolve("world/level.dat")));
+        Path slip = tmp.resolve("backups").resolve("backup-default-20000101-000000-zz.zip");
+        try (var z = new java.util.zip.ZipOutputStream(Files.newOutputStream(slip))) {
+            z.putNextEntry(new java.util.zip.ZipEntry("../secret.txt"));
+            z.write("nope".getBytes());
+            z.closeEntry();
+        }
+        assertThrows(SecurityException.class, () -> BackupBridge.restore(fresh, spec, "default", slip.getFileName().toString()));
+        assertFalse(Files.exists(tmp.resolve("secret.txt")));
+        BackupBridge.delete(spec, "default", slip.getFileName().toString());
+        BackupBridge.delete(spec, "default", name);
+        assertEquals(1, BackupBridge.list(spec, "default").size());
+        assertThrows(IllegalArgumentException.class, () -> BackupBridge.file(spec, "default", "../" + name));
     }
 }

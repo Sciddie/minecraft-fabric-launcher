@@ -8,6 +8,21 @@ import java.util.Locale;
 final class CronExpr {
     private CronExpr() {}
 
+    /** Next match strictly after {@code from}, within 366 days. Seconds are ignored. */
+    static ZonedDateTime next(String expr, ZonedDateTime from) {
+        if (expr == null || expr.isBlank()) return null;
+        String[] f = expr.trim().split("\\s+");
+        if (f.length != 5) throw new IllegalArgumentException("cron needs 5 fields");
+        ZonedDateTime t = from.withSecond(0).withNano(0).plusMinutes(1);
+        for (int i = 0; i < 366 * 24 * 60; i++) {
+            if (matches(expr, t)) return t;
+            boolean hour = field(f[1], t.getHour(), 0, 23);
+            boolean month = field(f[3], t.getMonthValue(), 1, 12);
+            t = hour && month ? t.plusMinutes(1) : t.plusHours(1).withMinute(0);
+        }
+        return null;
+    }
+
     static boolean matches(String expr, ZonedDateTime time) {
         if (expr == null) throw new IllegalArgumentException("cron");
         String[] f = expr.trim().split("\\s+");

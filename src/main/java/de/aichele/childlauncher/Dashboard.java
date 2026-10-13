@@ -176,7 +176,7 @@ final class Dashboard {
                 case "POST /api/diag/heap" -> json(ex, 200, Map.of("text", pl.jcmd(sid, "GC.heap_info")));
                 case "POST /api/diag/flags" -> json(ex, 200, Map.of("text", pl.jcmd(sid, "VM.flags")));
                 case "GET /api/logs" -> logs(ex, q, sid);
-                case "GET /api/tasks" -> json(ex, 200, pl.tasks().stream().map(Dashboard::taskJson).toList());
+                case "GET /api/tasks" -> json(ex, 200, pl.tasks().stream().map(this::taskJson).toList());
                 case "POST /api/tasks/run" -> {
                     String id = q.getOrDefault("id", "");
                     TaskDef found = null;
@@ -189,13 +189,23 @@ final class Dashboard {
                     String type = q.getOrDefault("type", "fabric");
                     json(ex, 200, Map.of("type", type, "versions", pl.versions(type)));
                 }
-                case "GET /api/backup" -> json(ex, 200, Map.of("last", pl.lastBackup == null ? "" : pl.lastBackup));
+                case "GET /api/backup" -> {
+                    Map<String, Object> b = new LinkedHashMap<>();
+                    b.put("last", pl.lastBackup == null ? "" : pl.lastBackup);
+                    b.put("files", pl.backupFiles(sid).stream().map(Dashboard::backupJson).toList());
+                    json(ex, 200, b);
+                }
+                case "GET /api/backup/download" -> backupDownload(ex, sid, q.get("name"));
                 case "POST /api/backup" -> json(ex, 200, Map.of("ok", true, "last", pl.runBackup(sid)));
+                case "POST /api/backup/delete" -> backupMutate(ex, sid, false);
+                case "POST /api/backup/restore" -> backupMutate(ex, sid, true);
                 case "POST /api/backup/test" -> { pl.testBackupDb(); json(ex, 200, Map.of("ok", true)); }
                 default -> json(ex, 404, Map.of("error", "Not found"));
             }
         } catch (SecurityException e) {
             json(ex, 403, Map.of("error", e.getMessage()));
+        } catch (IllegalStateException e) {
+            json(ex, 409, Map.of("error", String.valueOf(e.getMessage())));
         } catch (IllegalArgumentException e) {
             json(ex, 400, Map.of("error", String.valueOf(e.getMessage())));
         } catch (Exception e) {
@@ -289,16 +299,48 @@ final class Dashboard {
             v.put("pid", pl.pid(p.id));
             v.put("status", pl.lastStatus(p.id));
             v.put("focus", p.id.equals(pl.focusId()));
+            v.put("portClash", Profiles.portClash(pl.profiles(), p.port));
             out.add(v);
         }
         return out;
     }
 
-    private static Map<String, Object> taskJson(TaskDef t) {
+    private Map<String, Object> taskJson(TaskDef t) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("id", t.id); m.put("enabled", t.enabled); m.put("cron", t.cron); m.put("timezone", t.timezone);
         m.put("action", t.action); m.put("command", t.command); m.put("server", t.server);
+        m.put("next", pl.taskNext(t)); m.put("last", pl.taskLast(t.id));
         return m;
+    }
+
+    private static Map<String, Object> backupJson(BackupBridge.Entry e) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("name", e.name()); m.put("bytes", e.bytes()); m.put("mtime", e.mtime());
+        return m;
+    }
+
+    private void backupDownload(HttpExchange ex, String sid, String name) throws IOException {
+        Path f = pl.backupFile(sid, name);
+        ex.getResponseHeaders().set("Content-Type", "application/octet-stream");
+        ex.getResponseHeaders().set("Content-Disposition", "attachment; filename=\"" + f.getFileName().toString().replaceAll("[\"\\\\\\r\\n]", "_") + "\"");
+        ex.sendResponseHeaders(200, Files.size(f));
+        try (OutputStream os = ex.getResponseBody()) { Files.copy(f, os); }
+    }
+
+    private void backupMutate(HttpExchange ex, String sid, boolean restore) throws Exception {
+        JsonObject o = JsonParser.parseString(readBodyText(ex)).getAsJsonObject();
+        String name = o.get("name").getAsString();
+        String confirm = o.has("confirm") ? o.get("confirm").getAsString() : "";
+        if (!name.equals(confirm)) { json(ex, 400, Map.of("error", "Bestätigung fehlt")); return; }
+        if (restore) {
+            int n = pl.restoreBackup(sid, name);
+            pl.info(sid, "Restored " + n + " files from " + name);
+            json(ex, 200, Map.of("ok", true, "files", n));
+        } else {
+            pl.deleteBackup(sid, name);
+            pl.info(sid, "Deleted backup " + name);
+            json(ex, 200, Map.of("ok", true));
+        }
     }
 
     private Map<String, Object> spigotStats() {

@@ -6,6 +6,7 @@ import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.security.DigestOutputStream;
 import java.security.MessageDigest;
 import java.sql.Connection;
@@ -20,7 +21,9 @@ import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Properties;
+import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
 
 /** Zip on demand, then optional metadata in an external JDBC database. No local database is started. */
@@ -29,8 +32,90 @@ final class BackupBridge {
                 String password, String driverJar, String driverClass, String table) {}
 
     record Result(String id, String path, long bytes, String sha256, String db) {}
+    record Entry(String name, long bytes, long mtime) {}
+
+    private static final long MAX_RESTORE_BYTES = 32L * 1024 * 1024 * 1024;
+    private static final int MAX_RESTORE_FILES = 100_000;
 
     private BackupBridge() {}
+
+    static List<Entry> list(Spec spec, String serverId) throws IOException {
+        Path dir = directory(spec);
+        if (!Files.isDirectory(dir)) return List.of();
+        String safe = safeId(serverId);
+        List<Entry> out = new ArrayList<>();
+        try (var ds = Files.newDirectoryStream(dir, "backup-" + safe + "-*.zip")) {
+            for (Path p : ds) {
+                if (!named(safe, p.getFileName().toString()) || !Files.isRegularFile(p) || Files.isSymbolicLink(p)) continue;
+                BasicFileAttributes a = Files.readAttributes(p, BasicFileAttributes.class);
+                out.add(new Entry(p.getFileName().toString(), a.size(), a.lastModifiedTime().toMillis()));
+            }
+        }
+        out.sort(Comparator.comparing(Entry::name).reversed());
+        return out;
+    }
+
+    static Path file(Spec spec, String serverId, String name) {
+        String safe = safeId(serverId);
+        if (!named(safe, name)) throw new IllegalArgumentException("backup name");
+        Path dir = directory(spec);
+        Path f = dir.resolve(name).normalize();
+        if (f.getParent() == null || !f.getParent().equals(dir)) throw new IllegalArgumentException("backup name");
+        if (!Files.isRegularFile(f) || Files.isSymbolicLink(f)) throw new IllegalArgumentException("backup name");
+        return f;
+    }
+
+    static void delete(Spec spec, String serverId, String name) throws IOException {
+        Files.deleteIfExists(file(spec, serverId, name));
+    }
+
+    /** Extracts a backup this bridge wrote. Rejects traversal. Caller must stop the child first. */
+    static int restore(Path work, Spec spec, String serverId, String name) throws IOException {
+        PathGuard guard = PathGuard.open(work);
+        Path zip = file(spec, serverId, name);
+        int n = 0;
+        long bytes = 0;
+        try (ZipFile z = new ZipFile(zip.toFile())) {
+            if (z.size() > MAX_RESTORE_FILES) throw new IOException("zip too large");
+            var en = z.entries();
+            while (en.hasMoreElements()) {
+                ZipEntry e = en.nextElement();
+                if (e.isDirectory()) continue;
+                String raw = e.getName().replace('\\', '/');
+                if (raw.isBlank() || raw.contains("\0")) throw new SecurityException("zip entry");
+                if (e.getSize() > MAX_RESTORE_BYTES) throw new IOException("zip entry too large");
+                Path target = guard.resolve(raw);
+                if (Files.isSymbolicLink(target)) throw new SecurityException("symlink");
+                if (target.getParent() != null) Files.createDirectories(target.getParent());
+                try (InputStream in = z.getInputStream(e); var out = Files.newOutputStream(target)) {
+                    byte[] buf = new byte[65536];
+                    int r;
+                    while ((r = in.read(buf)) > 0) {
+                        bytes += r;
+                        if (bytes > MAX_RESTORE_BYTES) throw new IOException("zip too large");
+                        out.write(buf, 0, r);
+                    }
+                }
+                n++;
+            }
+        }
+        if (n == 0) throw new IOException("empty zip");
+        return n;
+    }
+
+    private static Path directory(Spec spec) {
+        if (spec.directory == null || spec.directory.isBlank()) throw new IllegalArgumentException("backup directory");
+        return Path.of(spec.directory).toAbsolutePath().normalize();
+    }
+
+    static String safeId(String serverId) {
+        String s = serverId == null ? "" : serverId.replaceAll("[^A-Za-z0-9._-]", "_");
+        return s.isBlank() ? "server" : s;
+    }
+
+    private static boolean named(String safe, String name) {
+        return name != null && name.matches("backup-" + Pattern.quote(safe) + "-[0-9]{8}-[0-9]{6}-[0-9a-z]+\\.zip");
+    }
 
     static Result archive(Path work, Spec spec, String serverId) throws Exception {
         if (spec.directory == null || spec.directory.isBlank()) throw new IOException("backup directory");
@@ -38,7 +123,7 @@ final class BackupBridge {
         Path dir = Path.of(spec.directory);
         Files.createDirectories(dir);
         String stamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")) + "-" + Long.toString(System.nanoTime(), 36);
-        String safe = serverId.replaceAll("[^A-Za-z0-9._-]", "_");
+        String safe = safeId(serverId);
         Path zip = dir.resolve("backup-" + safe + "-" + stamp + ".zip");
         MessageDigest md = MessageDigest.getInstance("SHA-256");
         int files = 0;

@@ -1,6 +1,6 @@
 <project xmlns="http://maven.apache.org/POM/4.0.0">
   <modelVersion>4.0.0</modelVersion>
-  <groupId>de.aichele</groupId><artifactId>FabricLauncher</artifactId><version>1.2.0-pre.1</version>
+  <groupId>de.aichele</groupId><artifactId>FabricLauncher</artifactId><version>1.2.0-pre.2</version>
   <properties><maven.compiler.release>25</maven.compiler.release><project.build.sourceEncoding>UTF-8</project.build.sourceEncoding></properties>
   <repositories><repository><id>spigot</id><url>https://hub.spigotmc.org/nexus/content/repositories/snapshots/</url></repository></repositories>
   <dependencies>

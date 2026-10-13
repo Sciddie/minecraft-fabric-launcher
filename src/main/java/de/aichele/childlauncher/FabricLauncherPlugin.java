@@ -27,6 +27,7 @@ public final class FabricLauncherPlugin extends JavaPlugin {
     private volatile String focus = "default";
     private volatile boolean allowParallel;
     private final Map<String, String> taskFired = new ConcurrentHashMap<>();
+    private final Map<String, String> taskLast = new ConcurrentHashMap<>();
     volatile String lastBackup = "";
     private final Map<String, ProcessProbe.Disk> diskCaches = new ConcurrentHashMap<>();
     private final Map<String, Long> diskCacheAt = new ConcurrentHashMap<>();
@@ -252,7 +253,7 @@ public final class FabricLauncherPlugin extends JavaPlugin {
         String id = task.server.isBlank() ? focus : task.server;
         try {
             switch (task.action) {
-                case "start" -> { startAsync(null, id); }
+                case "start" -> startAsync(null, id);
                 case "stop" -> { ChildSlot s = slot(id); s.wantRunning = false; stopBlocking(s); }
                 case "restart" -> requestRestart(id);
                 case "backup" -> runBackup(id);
@@ -261,9 +262,31 @@ public final class FabricLauncherPlugin extends JavaPlugin {
                     boolean ok = send(slot(id), cmd.startsWith("/") ? cmd.substring(1) : cmd);
                     slot(id).console.add("[FabricLauncher] task " + task.id + (ok ? " sent " : " skipped ") + cmd);
                 }
-                default -> getLogger().warning("Unknown task action " + task.action);
+                default -> throw new IllegalArgumentException("action " + task.action);
             }
-        } catch (Exception e) { getLogger().log(Level.WARNING, "Task " + task.id + " failed", e); }
+            noteTask(task.id, "ok");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            noteTask(task.id, "interrupted");
+            getLogger().log(Level.WARNING, "Task " + task.id + " interrupted", e);
+        } catch (Exception e) {
+            noteTask(task.id, e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+            getLogger().log(Level.WARNING, "Task " + task.id + " failed", e);
+        }
+    }
+
+    String taskLast(String id) { return taskLast.getOrDefault(id, ""); }
+
+    String taskNext(TaskDef task) {
+        if (task.cron == null || task.cron.isBlank()) return "";
+        try {
+            java.time.ZonedDateTime z = CronExpr.next(task.cron, java.time.ZonedDateTime.now(java.time.ZoneId.of(task.timezone)));
+            return z == null ? "" : z.toString();
+        } catch (RuntimeException e) { return ""; }
+    }
+
+    private void noteTask(String id, String state) {
+        taskLast.put(id, java.time.OffsetDateTime.now() + " " + state);
     }
 
     String runBackup(String id) throws Exception {
@@ -280,6 +303,19 @@ public final class FabricLauncherPlugin extends JavaPlugin {
     }
 
     void testBackupDb() throws Exception { BackupBridge.test(backupSpec()); }
+
+    List<BackupBridge.Entry> backupFiles(String id) throws IOException { return BackupBridge.list(backupSpec(), id); }
+
+    Path backupFile(String id, String name) { return BackupBridge.file(backupSpec(), id, name); }
+
+    void deleteBackup(String id, String name) throws IOException { BackupBridge.delete(backupSpec(), id, name); }
+
+    int restoreBackup(String id, String name) throws IOException {
+        if (slot(id).running()) throw new IllegalStateException("stop the server first");
+        int n = BackupBridge.restore(profile(id).directory(), backupSpec(), id, name);
+        slot(id).console.add("[FabricLauncher] restored " + n + " files from " + name);
+        return n;
+    }
 
     private BackupBridge.Spec backupSpec() {
         FileConfiguration c = getConfig();
@@ -515,15 +551,26 @@ public final class FabricLauncherPlugin extends JavaPlugin {
                 s.sendMessage(cur.id + ": " + (cur.running() ? "RUNNING pid " + cur.pid() + ", up " + cur.uptimeMillis() / 1000 + "s" : "NOT RUNNING") + " | " + cur.lastStatus);
                 s.sendMessage("Type " + pr.type + " " + pr.mcVersion + " on port " + pr.port + ", dir " + pr.directory());
             }
-            case "servers" -> { for (ServerProfile pr : profiles) s.sendMessage((pr.id.equals(focus) ? "* " : "  ") + pr.id + " " + pr.type + " " + pr.mcVersion + " :" + pr.port + (slot(pr.id).running() ? " RUNNING" : "")); }
+            case "servers" -> { for (ServerProfile pr : profiles) s.sendMessage((pr.id.equals(focus) ? "* " : "  ") + pr.id + " " + pr.type + " " + pr.mcVersion + " :" + pr.port + (Profiles.portClash(profiles, pr.port) ? " CLASH" : "") + (slot(pr.id).running() ? " RUNNING" : "")); }
             case "focus" -> { if (a.length < 2) { s.sendMessage("focus " + focus); return true; } focus(a[1]); s.sendMessage("focus " + focus); }
-            case "tasks" -> { for (TaskDef t : tasks()) s.sendMessage((t.enabled ? "on  " : "off ") + t.id + " " + t.cron + " " + t.timezone + " " + t.action); }
+            case "tasks" -> { for (TaskDef t : tasks()) s.sendMessage((t.enabled ? "on  " : "off ") + t.id + " " + t.cron + " " + t.timezone + " " + t.action + " next " + taskNext(t)); }
             case "task" -> {
                 if (a.length < 3 || !a[1].equalsIgnoreCase("run")) { s.sendMessage("/child task run <id>"); return true; }
                 TaskDef found = null; for (TaskDef t : tasks()) if (t.id.equals(a[2])) found = t;
                 if (found == null) s.sendMessage("Unknown task"); else { TaskDef run = found; exec.submit(() -> runTask(run)); s.sendMessage("Task " + a[2]); }
             }
-            case "backup" -> { s.sendMessage("Backup " + focus + "..."); exec.submit(() -> { try { msg(s, runBackup(focus)); } catch (Exception e) { msg(s, "Backup failed: " + e.getMessage()); } }); }
+            case "backup" -> {
+                if (a.length >= 2 && a[1].equalsIgnoreCase("list")) {
+                    try { for (var e : backupFiles(focus)) s.sendMessage(e.name() + " " + e.bytes()); }
+                    catch (IOException e) { s.sendMessage("Failed: " + e.getMessage()); }
+                } else if (a.length >= 3 && a[1].equalsIgnoreCase("delete")) {
+                    try { deleteBackup(focus, a[2]); s.sendMessage("Deleted " + a[2]); }
+                    catch (Exception e) { s.sendMessage("Failed: " + e.getMessage()); }
+                } else if (a.length >= 3 && a[1].equalsIgnoreCase("restore")) {
+                    String file = a[2];
+                    exec.submit(() -> { try { msg(s, "Restored " + restoreBackup(focus, file) + " files"); } catch (Exception e) { msg(s, "Restore failed: " + e.getMessage()); } });
+                } else { s.sendMessage("Backup " + focus + "..."); exec.submit(() -> { try { msg(s, runBackup(focus)); } catch (Exception e) { msg(s, "Backup failed: " + e.getMessage()); } }); }
+            }
             case "versions" -> {
                 if (a.length < 2) { s.sendMessage("/child versions <fabric|paper|vanilla|spigot>"); return true; }
                 exec.submit(() -> { try { for (String v : versions(a[1])) msg(s, v); } catch (Exception e) { msg(s, "Versions failed: " + e.getMessage()); } });

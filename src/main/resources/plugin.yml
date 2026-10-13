@@ -7,7 +7,7 @@ description: Launches and supervises child Minecraft servers (Fabric/Paper/Spigo
 commands:
   child:
     description: Control the child server
-    usage: /child <start|stop|restart|status|cmd|config|prop|mods|mod|diag|threaddump|heap|flags|servers|focus|tasks|task|backup|versions>
+    usage: /child <start|stop|restart|status|cmd|config|prop|mods|mod|diag|threaddump|heap|flags|servers|focus|tasks|task|backup|versions|plan|crashes>
     permission: fabriclauncher.admin
 permissions:
   fabriclauncher.admin:

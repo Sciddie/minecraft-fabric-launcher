@@ -185,6 +185,9 @@ final class Dashboard {
                     pl.runTask(found);
                     json(ex, 200, Map.of("ok", true, "id", id));
                 }
+                case "GET /api/plan" -> text(ex, pl.planText(sid));
+                case "GET /api/crashes" -> json(ex, 200, pl.crashFiles(sid));
+                case "GET /api/crashes/read" -> text(ex, pl.crashText(sid, q.get("file")));
                 case "GET /api/versions" -> {
                     String type = q.getOrDefault("type", "fabric");
                     json(ex, 200, Map.of("type", type, "versions", pl.versions(type)));

@@ -147,4 +147,39 @@ class HosterTest {
         assertEquals(1, BackupBridge.list(spec, "default").size());
         assertThrows(IllegalArgumentException.class, () -> BackupBridge.file(spec, "default", "../" + name));
     }
+
+    @Test void launchPlanDropsDeadFlagAndNamesJars() {
+        Path dir = tmp.resolve("plan");
+        ServerProfile fabric = profile("fabric", "26.3", "server.jar", List.of("-XX:+UseG1GC", "-XX:G1RSetUpdatingPauseIntervalMillis=0", "-Xlog:gc"), List.of("--bonus"), dir.toString());
+        List<String> argv = LaunchPlan.argv("java", fabric);
+        String joined = String.join("\n", argv);
+        assertFalse(joined.contains("G1RSetUpdatingPauseIntervalMillis"));
+        assertEquals(List.of("java", "-XX:+IgnoreUnrecognizedVMOptions", "-Xms8G", "-Xmx8G", "-XX:+UseG1GC", "-Xlog:gc", "-jar", dir.resolve("fabric-server-launch-26.3.jar").toString(), "nogui", "--bonus"), argv);
+        assertFalse(Files.exists(dir.resolve("fabric-server-launch-26.3.jar")));
+        assertEquals("paper-26.3.jar", LaunchPlan.jarName("paper", "26.3", null));
+        assertEquals("minecraft_server-1.21.8.jar", LaunchPlan.jarName("vanilla", "1.21.8", null));
+        assertEquals("spigot-26.3.jar", LaunchPlan.jarName("spigot", "26.3", null));
+        assertEquals("custom-pack.jar", LaunchPlan.jarName("custom", "26.3", "/opt/jars/custom-pack.jar"));
+        assertEquals("server.jar", LaunchPlan.jarName("other", "26.3", null));
+    }
+
+    @Test void crashIndexReadsAndRejectsEscape() throws Exception {
+        Path root = Files.createDirectories(tmp.resolve("child"));
+        Path crashes = Files.createDirectories(root.resolve("crash-reports"));
+        Files.writeString(crashes.resolve("crash-2026-10-13_12.00.00.txt"), "hello crash\nline2\n");
+        Files.writeString(crashes.resolve("notes.md"), "nope");
+        Path outside = Files.createDirectories(tmp.resolve("outside"));
+        Files.writeString(outside.resolve("secret.txt"), "secret");
+        Files.createSymbolicLink(crashes.resolve("link.txt"), outside.resolve("secret.txt"));
+        assertEquals(List.of("crash-2026-10-13_12.00.00.txt"), CrashIndex.list(root));
+        String body = CrashIndex.read(root, "crash-2026-10-13_12.00.00.txt");
+        assertTrue(body.startsWith("hello crash\nline2"));
+        assertThrows(SecurityException.class, () -> CrashIndex.read(root, "../secret.txt"));
+        assertThrows(SecurityException.class, () -> CrashIndex.read(root, "link.txt"));
+        assertFalse(body.contains("secret"));
+    }
+
+    private static ServerProfile profile(String type, String mc, String custom, List<String> flags, List<String> args, String dir) {
+        return new ServerProfile("t", type, mc, 2063, "0.0.0.0", custom, "latest", "latest", dir, "8G", "8G", flags, args, false, Map.of(), Map.of());
+    }
 }

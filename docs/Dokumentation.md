@@ -1,6 +1,6 @@
 # FabricLauncher – Dokumentation
 
-*Stand: 13.10.2026 · Plugin-Version 1.2.0-pre.2 · Spigot 26.3 / Java 25 · Zap-Hosting-Server `g266459`*
+*Stand: 13.10.2026 · Plugin-Version 1.3.0 · Spigot 26.3 / Java 25 · Zap-Hosting-Server `g266459`*
 
 **Neu aufsetzen:** Schritt für Schritt auf einem neuen Spigot-Server steht in [SETUP.md](SETUP.md).
 
@@ -36,7 +36,7 @@ Zap-Container (4 Kerne)
 
 Die ausführliche Ersteinrichtung (Voraussetzungen, FTP, erster Start, `config.yml`, Weltumzug, Dashboard) steht in [SETUP.md](SETUP.md). Kurzfassung:
 
-1. `FabricLauncher-1.2.0-pre.2.jar` nach `plugins/` hochladen (FTP).
+1. `FabricLauncher-1.3.0.jar` nach `plugins/` hochladen (FTP).
 2. Spigot starten. Beim ersten Start:
    - `plugins/FabricLauncher/config.yml` wird erzeugt,
    - Dashboard-Passwort wird erzeugt (`plugins/FabricLauncher/dashboard-password.txt`, einmalig im Log),
@@ -102,6 +102,8 @@ Standardwerte unter `serverProperties`: `white-list: false`, `enforce-whitelist:
 | `/child backup delete <datei>` | Zip löschen |
 | `/child backup restore <datei>` | Zurückspielen, nur bei gestopptem Child |
 | `/child versions <typ>` | Katalog `fabric`, `paper`, `vanilla` oder `spigot`. Es wird nichts geladen. |
+| `/child plan` | JVM-argv. Lädt nichts und startet nichts. |
+| `/child crashes` | `crash-reports/*.txt`. `/child crashes <datei>` liest. |
 
 Per RCON (Port 2062) funktionieren dieselben Befehle ohne Schrägstrich.
 
